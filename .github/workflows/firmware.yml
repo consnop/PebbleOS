@@ -122,21 +122,30 @@ jobs:
           pip install -U pip
           pip install -r requirements.txt
 
+      # Both slots: the phone app's updater installs into whichever slot is free, from the merged
+      # bundle; the slot 0 bundle alone is what flashing through recovery (pbl run -r phone) takes.
       - name: Build
         working-directory: src
         run: |
-          pbl configure --board "$BOARD" -DCONFIG_FIRMWARE_SLOT=0 -DCONFIG_RELEASE=y
-          pbl build
-          pbl bundle
+          for slot in 0 1; do
+            pbl -b "build$slot" configure --board "$BOARD" -DCONFIG_FIRMWARE_SLOT=$slot -DCONFIG_RELEASE=y
+            pbl -b "build$slot" build
+            pbl -b "build$slot" bundle
+          done
 
       - name: Collect
         working-directory: src
         run: |
           name=$(printf '%s' "$BOARD" | tr @ _)
           mkdir ../out
-          cp build/normal_"${name}"_*.pbz ../out/
-          cp build/pebbleos.elf "../out/firmware_${name}_${RELEASE}_slot0.elf"
-          cp build/pebbleos_loghash_dict.json "../out/firmware_${name}_${RELEASE}_slot0_loghash_dict.json"
+          s0="build0/normal_${name}_${RELEASE}_slot0.pbz"
+          s1="build1/normal_${name}_${RELEASE}_slot1.pbz"
+          python3 tools/merge_pbz.py --slot0-pbz "$s0" --slot1-pbz "$s1" --output "../out/normal_${name}_${RELEASE}.pbz"
+          cp "$s0" ../out/
+          for slot in 0 1; do
+            cp "build$slot/pebbleos.elf" "../out/firmware_${name}_${RELEASE}_slot$slot.elf"
+          done
+          cp build0/pebbleos_loghash_dict.json "../out/firmware_${name}_${RELEASE}_loghash_dict.json"
           ls -la ../out
 
       - uses: actions/upload-artifact@v7
@@ -167,8 +176,9 @@ jobs:
             echo
             for p in patches/*.patch; do echo "- $(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$p" | head -1)"; done
             echo
-            echo "Flash the \`.pbz\` through the phone (Dev Connection on, then \`pbl run -r phone\`), or with"
-            echo "\`pebble fw install\`. The watch reports \`$RELEASE\` as its firmware version."
+            echo "Gravel built with the consnop patches offers this as a normal firmware update (the merged"
+            echo "\`normal_<board>_<tag>.pbz\`). Over USB, flash the \`_slot0.pbz\` through recovery with"
+            echo "\`pbl run -r phone\`. The watch reports \`$RELEASE\` as its firmware version."
           } > notes.md
           gh release delete "$RELEASE" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$RELEASE" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
