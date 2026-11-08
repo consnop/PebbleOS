@@ -20,12 +20,21 @@ AppInstallId quick_launch_single_click_get_app(ButtonId button);
 void quick_launch_single_click_set_app(ButtonId button, AppInstallId app_id);
 void quick_launch_single_click_set_enabled(ButtonId button, bool enabled);
 
-bool quick_launch_combo_back_up_is_enabled(void);
-AppInstallId quick_launch_combo_back_up_get_app(void);
-void quick_launch_combo_back_up_set_app(AppInstallId app_id);
-void quick_launch_combo_back_up_set_enabled(bool enabled);
+//! Two buttons held together on the watchface.
+typedef enum QuickLaunchCombo {
+  QuickLaunchComboBackUp,
+  QuickLaunchComboUpDown,
+  QuickLaunchComboBackSelect,
+  QuickLaunchComboBackDown,
+  QuickLaunchComboUpSelect,
+  QuickLaunchComboSelectDown,
 
-bool quick_launch_combo_up_down_is_enabled(void);
-AppInstallId quick_launch_combo_up_down_get_app(void);
-void quick_launch_combo_up_down_set_app(AppInstallId app_id);
-void quick_launch_combo_up_down_set_enabled(bool enabled);
+  QuickLaunchComboCount,
+} QuickLaunchCombo;
+
+//! Bitmask of the combo's buttons, one bit per ButtonId.
+uint8_t quick_launch_combo_get_buttons(QuickLaunchCombo combo);
+bool quick_launch_combo_is_enabled(QuickLaunchCombo combo);
+AppInstallId quick_launch_combo_get_app(QuickLaunchCombo combo);
+void quick_launch_combo_set_app(QuickLaunchCombo combo, AppInstallId app_id);
+void quick_launch_combo_set_enabled(QuickLaunchCombo combo, bool enabled);

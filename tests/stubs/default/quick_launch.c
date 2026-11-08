@@ -16,10 +16,6 @@ AppInstallId PBL_WEAK quick_launch_single_click_get_app(ButtonId button) {
   return 0;
 }
 
-AppInstallId PBL_WEAK quick_launch_combo_back_up_get_app(void) {
-  return 0;
-}
-
-AppInstallId PBL_WEAK quick_launch_combo_up_down_get_app(void) {
+AppInstallId PBL_WEAK quick_launch_combo_get_app(QuickLaunchCombo combo) {
   return 0;
 }

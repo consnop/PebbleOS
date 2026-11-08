@@ -25,14 +25,12 @@
 #define BIT_SET              (1)
 #define BIT_CLEAR            (0)
 // Button events are remapped at the driver level when the display is rotated
-// (left-hand mode), so these masks are correct in either orientation.
-#define COMBO_BACK_UP_BUTTONS ((BIT_SET << BUTTON_ID_BACK) | (BIT_SET << BUTTON_ID_UP))
-#define COMBO_UP_DOWN_BUTTONS ((BIT_SET << BUTTON_ID_UP) | (BIT_SET << BUTTON_ID_DOWN))
+// (left-hand mode), so combo button masks are correct in either orientation.
 
 static ClickManager s_click_manager;
 static uint8_t s_buttons_pressed = BIT_CLEAR;
 static AppTimer *s_combo_back_hold_timer = nullptr;
-static uint8_t s_active_combo_buttons = BIT_CLEAR;
+static QuickLaunchCombo s_active_combo = QuickLaunchComboCount;
 
 static void prv_launch_quick_launch_app(AppInstallId app_id, ButtonId button,
                                         AppLaunchReason timeline_reason,
@@ -55,77 +53,67 @@ static void prv_launch_app_via_button(AppLaunchEventConfig *config, ClickRecogni
   app_manager_put_launch_app_event(config);
 }
 
-static bool prv_is_combo_pressed(uint8_t combo_buttons) {
-  return (s_buttons_pressed & combo_buttons) == combo_buttons;
+static bool prv_is_combo_pressed(QuickLaunchCombo combo) {
+  const uint8_t buttons = quick_launch_combo_get_buttons(combo);
+  return (s_buttons_pressed & buttons) == buttons;
 }
 
-static bool prv_combo_is_enabled(uint8_t combo_buttons) {
-  if (combo_buttons == COMBO_BACK_UP_BUTTONS) {
-    return quick_launch_combo_back_up_is_enabled();
-  } else if (combo_buttons == COMBO_UP_DOWN_BUTTONS) {
-    return quick_launch_combo_up_down_is_enabled();
+//! The first combo whose buttons are all held, or QuickLaunchComboCount.
+static QuickLaunchCombo prv_pressed_combo(void) {
+  for (QuickLaunchCombo combo = 0; combo < QuickLaunchComboCount; combo++) {
+    if (prv_is_combo_pressed(combo)) {
+      return combo;
+    }
   }
-  return false;
-}
-
-static AppInstallId prv_combo_get_app(uint8_t combo_buttons) {
-  if (combo_buttons == COMBO_BACK_UP_BUTTONS) {
-    return quick_launch_combo_back_up_get_app();
-  } else if (combo_buttons == COMBO_UP_DOWN_BUTTONS) {
-    return quick_launch_combo_up_down_get_app();
-  }
-  return INSTALL_ID_INVALID;
+  return QuickLaunchComboCount;
 }
 
 static bool prv_is_any_combo_active(void) {
-  return (s_combo_back_hold_timer != nullptr) || prv_is_combo_pressed(COMBO_BACK_UP_BUTTONS) ||
-         prv_is_combo_pressed(COMBO_UP_DOWN_BUTTONS);
+  return (s_combo_back_hold_timer != nullptr) || (prv_pressed_combo() != QuickLaunchComboCount);
+}
+
+//! The combo's lowest-numbered button stands in for it in the launch event.
+static ButtonId prv_combo_source_button(QuickLaunchCombo combo) {
+  const uint8_t buttons = quick_launch_combo_get_buttons(combo);
+  for (ButtonId button = 0; button < NUM_BUTTONS; button++) {
+    if (buttons & (BIT_SET << button)) {
+      return button;
+    }
+  }
+  return BUTTON_ID_BACK;
 }
 
 static void prv_combo_back_timer_callback(void *data) {
   s_combo_back_hold_timer = nullptr;
-  if (!prv_is_combo_pressed(s_active_combo_buttons)) {
-    s_active_combo_buttons = BIT_CLEAR;
+  const QuickLaunchCombo combo = s_active_combo;
+  s_active_combo = QuickLaunchComboCount;
+  if ((combo == QuickLaunchComboCount) || !prv_is_combo_pressed(combo) ||
+      !quick_launch_combo_is_enabled(combo)) {
     return;
   }
 
-  if (!prv_combo_is_enabled(s_active_combo_buttons)) {
-    s_active_combo_buttons = BIT_CLEAR;
-    return;
-  }
-
-  AppInstallId app_id = prv_combo_get_app(s_active_combo_buttons);
-  const ButtonId source_button =
-      (s_active_combo_buttons == COMBO_BACK_UP_BUTTONS) ? BUTTON_ID_BACK : BUTTON_ID_UP;
-  s_active_combo_buttons = BIT_CLEAR;
+  AppInstallId app_id = quick_launch_combo_get_app(combo);
   if (app_id != INSTALL_ID_INVALID) {
     // Reset all button states before launching app to prevent state corruption.
     s_buttons_pressed = BIT_CLEAR;
-    prv_launch_quick_launch_app(app_id, source_button, APP_LAUNCH_QUICK_LAUNCH,
+    prv_launch_quick_launch_app(app_id, prv_combo_source_button(combo), APP_LAUNCH_QUICK_LAUNCH,
                                 APP_QUICK_LAUNCH_ACTION_COMBO);
   }
 }
 
 static void prv_check_combo_back_hold(void) {
-  uint8_t combo_buttons = BIT_CLEAR;
+  const QuickLaunchCombo combo = prv_pressed_combo();
 
-  if (prv_is_combo_pressed(COMBO_BACK_UP_BUTTONS)) {
-    combo_buttons = COMBO_BACK_UP_BUTTONS;
-  } else if (prv_is_combo_pressed(COMBO_UP_DOWN_BUTTONS)) {
-    combo_buttons = COMBO_UP_DOWN_BUTTONS;
-  }
-
-  if (combo_buttons != BIT_CLEAR) {
+  if (combo != QuickLaunchComboCount) {
     if (s_combo_back_hold_timer == nullptr) {
-      s_active_combo_buttons = combo_buttons;
+      s_active_combo = combo;
       // Cancel individual button timers to prevent them from firing.
       // This ensures only the combo executes, not individual hold handlers.
-      if (combo_buttons == COMBO_BACK_UP_BUTTONS) {
-        click_recognizer_reset(&s_click_manager.recognizers[BUTTON_ID_BACK]);
-        click_recognizer_reset(&s_click_manager.recognizers[BUTTON_ID_UP]);
-      } else {
-        click_recognizer_reset(&s_click_manager.recognizers[BUTTON_ID_UP]);
-        click_recognizer_reset(&s_click_manager.recognizers[BUTTON_ID_DOWN]);
+      const uint8_t buttons = quick_launch_combo_get_buttons(combo);
+      for (ButtonId button = 0; button < NUM_BUTTONS; button++) {
+        if (buttons & (BIT_SET << button)) {
+          click_recognizer_reset(&s_click_manager.recognizers[button]);
+        }
       }
       s_combo_back_hold_timer =
           app_timer_register(QUICK_LAUNCH_HOLD_MS, prv_combo_back_timer_callback, nullptr);
@@ -134,7 +122,7 @@ static void prv_check_combo_back_hold(void) {
     if (s_combo_back_hold_timer != nullptr) {
       app_timer_cancel(s_combo_back_hold_timer);
       s_combo_back_hold_timer = nullptr;
-      s_active_combo_buttons = BIT_CLEAR;
+      s_active_combo = QuickLaunchComboCount;
     }
   }
 }

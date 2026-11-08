@@ -241,6 +241,10 @@ static QuickLaunchPreference s_quick_launch_back = {
 #define PREF_KEY_QUICK_LAUNCH_SINGLE_CLICK_DOWN "qlSingleClickDown"
 #define PREF_KEY_QUICK_LAUNCH_COMBO_BACK_UP     "qlComboBackUp"
 #define PREF_KEY_QUICK_LAUNCH_COMBO_UP_DOWN     "qlComboUpDown"
+#define PREF_KEY_QUICK_LAUNCH_COMBO_BACK_SELECT "qlComboBackSelect"
+#define PREF_KEY_QUICK_LAUNCH_COMBO_BACK_DOWN   "qlComboBackDown"
+#define PREF_KEY_QUICK_LAUNCH_COMBO_UP_SELECT   "qlComboUpSelect"
+#define PREF_KEY_QUICK_LAUNCH_COMBO_SELECT_DOWN "qlComboSelectDown"
 
 static QuickLaunchPreference s_quick_launch_single_click_up = {
   .enabled = true,
@@ -258,6 +262,26 @@ static QuickLaunchPreference s_quick_launch_combo_back_up = {
 };
 
 static QuickLaunchPreference s_quick_launch_combo_up_down = {
+  .enabled = false,
+  .uuid = UUID_INVALID_INIT,
+};
+
+static QuickLaunchPreference s_quick_launch_combo_back_select = {
+  .enabled = false,
+  .uuid = UUID_INVALID_INIT,
+};
+
+static QuickLaunchPreference s_quick_launch_combo_back_down = {
+  .enabled = false,
+  .uuid = UUID_INVALID_INIT,
+};
+
+static QuickLaunchPreference s_quick_launch_combo_up_select = {
+  .enabled = false,
+  .uuid = UUID_INVALID_INIT,
+};
+
+static QuickLaunchPreference s_quick_launch_combo_select_down = {
   .enabled = false,
   .uuid = UUID_INVALID_INIT,
 };
@@ -711,6 +735,30 @@ static bool prv_set_s_quick_launch_combo_back_up(QuickLaunchPreference *pref) {
 static bool prv_set_s_quick_launch_combo_up_down(QuickLaunchPreference *pref) {
   prv_normalize_quick_launch_pref(pref);
   s_quick_launch_combo_up_down = *pref;
+  return true;
+}
+
+static bool prv_set_s_quick_launch_combo_back_select(QuickLaunchPreference *pref) {
+  prv_normalize_quick_launch_pref(pref);
+  s_quick_launch_combo_back_select = *pref;
+  return true;
+}
+
+static bool prv_set_s_quick_launch_combo_back_down(QuickLaunchPreference *pref) {
+  prv_normalize_quick_launch_pref(pref);
+  s_quick_launch_combo_back_down = *pref;
+  return true;
+}
+
+static bool prv_set_s_quick_launch_combo_up_select(QuickLaunchPreference *pref) {
+  prv_normalize_quick_launch_pref(pref);
+  s_quick_launch_combo_up_select = *pref;
+  return true;
+}
+
+static bool prv_set_s_quick_launch_combo_select_down(QuickLaunchPreference *pref) {
+  prv_normalize_quick_launch_pref(pref);
+  s_quick_launch_combo_select_down = *pref;
   return true;
 }
 
@@ -1912,48 +1960,71 @@ void quick_launch_single_click_set_enabled(ButtonId button, bool enabled) {
   prv_pref_set(key, &pref, sizeof(pref));
 }
 
-bool quick_launch_combo_back_up_is_enabled(void) {
-  return s_quick_launch_combo_back_up.enabled;
+//! The stored preference and key of a combo.
+static QuickLaunchPreference *prv_combo_pref(QuickLaunchCombo combo, const char **key) {
+  switch (combo) {
+    case QuickLaunchComboBackUp:
+      *key = PREF_KEY_QUICK_LAUNCH_COMBO_BACK_UP;
+      return &s_quick_launch_combo_back_up;
+    case QuickLaunchComboUpDown:
+      *key = PREF_KEY_QUICK_LAUNCH_COMBO_UP_DOWN;
+      return &s_quick_launch_combo_up_down;
+    case QuickLaunchComboBackSelect:
+      *key = PREF_KEY_QUICK_LAUNCH_COMBO_BACK_SELECT;
+      return &s_quick_launch_combo_back_select;
+    case QuickLaunchComboBackDown:
+      *key = PREF_KEY_QUICK_LAUNCH_COMBO_BACK_DOWN;
+      return &s_quick_launch_combo_back_down;
+    case QuickLaunchComboUpSelect:
+      *key = PREF_KEY_QUICK_LAUNCH_COMBO_UP_SELECT;
+      return &s_quick_launch_combo_up_select;
+    case QuickLaunchComboSelectDown:
+      *key = PREF_KEY_QUICK_LAUNCH_COMBO_SELECT_DOWN;
+      return &s_quick_launch_combo_select_down;
+    default:
+      PBL_ASSERTN(0); // invalid combo
+      return nullptr;
+  }
 }
 
-AppInstallId quick_launch_combo_back_up_get_app(void) {
-  return app_install_get_id_for_uuid(&s_quick_launch_combo_back_up.uuid);
+uint8_t quick_launch_combo_get_buttons(QuickLaunchCombo combo) {
+  static const uint8_t s_buttons[QuickLaunchComboCount] = {
+    [QuickLaunchComboBackUp] = (1 << BUTTON_ID_BACK) | (1 << BUTTON_ID_UP),
+    [QuickLaunchComboUpDown] = (1 << BUTTON_ID_UP) | (1 << BUTTON_ID_DOWN),
+    [QuickLaunchComboBackSelect] = (1 << BUTTON_ID_BACK) | (1 << BUTTON_ID_SELECT),
+    [QuickLaunchComboBackDown] = (1 << BUTTON_ID_BACK) | (1 << BUTTON_ID_DOWN),
+    [QuickLaunchComboUpSelect] = (1 << BUTTON_ID_UP) | (1 << BUTTON_ID_SELECT),
+    [QuickLaunchComboSelectDown] = (1 << BUTTON_ID_SELECT) | (1 << BUTTON_ID_DOWN),
+  };
+  PBL_ASSERTN(combo < QuickLaunchComboCount);
+  return s_buttons[combo];
 }
 
-void quick_launch_combo_back_up_set_app(AppInstallId app_id) {
+bool quick_launch_combo_is_enabled(QuickLaunchCombo combo) {
+  const char *key;
+  return prv_combo_pref(combo, &key)->enabled;
+}
+
+AppInstallId quick_launch_combo_get_app(QuickLaunchCombo combo) {
+  const char *key;
+  return app_install_get_id_for_uuid(&prv_combo_pref(combo, &key)->uuid);
+}
+
+void quick_launch_combo_set_app(QuickLaunchCombo combo, AppInstallId app_id) {
+  const char *key;
+  prv_combo_pref(combo, &key);
   QuickLaunchPreference pref = (QuickLaunchPreference){
     .enabled = true,
   };
   app_install_get_uuid_for_install_id(app_id, &pref.uuid);
-  prv_pref_set(PREF_KEY_QUICK_LAUNCH_COMBO_BACK_UP, &pref, sizeof(pref));
+  prv_pref_set(key, &pref, sizeof(pref));
 }
 
-void quick_launch_combo_back_up_set_enabled(bool enabled) {
-  QuickLaunchPreference pref = s_quick_launch_combo_back_up;
+void quick_launch_combo_set_enabled(QuickLaunchCombo combo, bool enabled) {
+  const char *key;
+  QuickLaunchPreference pref = *prv_combo_pref(combo, &key);
   pref.enabled = enabled;
-  prv_pref_set(PREF_KEY_QUICK_LAUNCH_COMBO_BACK_UP, &pref, sizeof(pref));
-}
-
-bool quick_launch_combo_up_down_is_enabled(void) {
-  return s_quick_launch_combo_up_down.enabled;
-}
-
-AppInstallId quick_launch_combo_up_down_get_app(void) {
-  return app_install_get_id_for_uuid(&s_quick_launch_combo_up_down.uuid);
-}
-
-void quick_launch_combo_up_down_set_app(AppInstallId app_id) {
-  QuickLaunchPreference pref = (QuickLaunchPreference){
-    .enabled = true,
-  };
-  app_install_get_uuid_for_install_id(app_id, &pref.uuid);
-  prv_pref_set(PREF_KEY_QUICK_LAUNCH_COMBO_UP_DOWN, &pref, sizeof(pref));
-}
-
-void quick_launch_combo_up_down_set_enabled(bool enabled) {
-  QuickLaunchPreference pref = s_quick_launch_combo_up_down;
-  pref.enabled = enabled;
-  prv_pref_set(PREF_KEY_QUICK_LAUNCH_COMBO_UP_DOWN, &pref, sizeof(pref));
+  prv_pref_set(key, &pref, sizeof(pref));
 }
 
 void watchface_set_default_install_id(AppInstallId app_id) {

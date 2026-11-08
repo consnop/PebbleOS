@@ -27,7 +27,8 @@
 #include <resource/resource_ids.auto.h>
 #include <shell/normal/quick_launch.h>
 
-#define NUM_ROWS (NUM_BUTTONS + 2) // 4 hold buttons + 2 tap buttons (up and down)
+// 2 tap buttons (up and down), 4 hold buttons, then the two-button combos
+#define NUM_ROWS (2 + NUM_BUTTONS + QuickLaunchComboCount)
 
 typedef enum {
   ROW_TAP_UP = 0,
@@ -36,6 +37,7 @@ typedef enum {
   ROW_HOLD_SELECT,
   ROW_HOLD_DOWN,
   ROW_HOLD_BACK,
+  ROW_COMBO_FIRST, // QuickLaunchComboCount rows, in QuickLaunchCombo order
 } QuickLaunchRow;
 
 typedef enum {
@@ -48,9 +50,8 @@ typedef enum {
 typedef struct QuickLaunchData {
   SettingsCallbacks callbacks;
   char app_names[NUM_ROWS][APP_NAME_SIZE_BYTES];
-  //! The button whose binding the pushed sub-menus are editing.
-  ButtonId button;
-  bool is_tap;
+  //! The binding the pushed sub-menus are editing.
+  QuickLaunchBinding binding;
 } QuickLaunchData;
 
 static const char *s_row_titles[NUM_ROWS] = {
@@ -66,6 +67,18 @@ static const char *s_row_titles[NUM_ROWS] = {
   [ROW_HOLD_DOWN] = i18n_noop("Hold Down"),
   /// Shown in Quick Launch Settings as the title of the hold back button quick launch option.
   [ROW_HOLD_BACK] = i18n_noop("Hold Back"),
+  /// Shown in Quick Launch Settings as the title of holding Back and Up together.
+  [ROW_COMBO_FIRST + QuickLaunchComboBackUp] = i18n_noop("Hold Back + Up"),
+  /// Shown in Quick Launch Settings as the title of holding Up and Down together.
+  [ROW_COMBO_FIRST + QuickLaunchComboUpDown] = i18n_noop("Hold Up + Down"),
+  /// Shown in Quick Launch Settings as the title of holding Back and Center together.
+  [ROW_COMBO_FIRST + QuickLaunchComboBackSelect] = i18n_noop("Hold Back + Center"),
+  /// Shown in Quick Launch Settings as the title of holding Back and Down together.
+  [ROW_COMBO_FIRST + QuickLaunchComboBackDown] = i18n_noop("Hold Back + Down"),
+  /// Shown in Quick Launch Settings as the title of holding Up and Center together.
+  [ROW_COMBO_FIRST + QuickLaunchComboUpSelect] = i18n_noop("Hold Up + Center"),
+  /// Shown in Quick Launch Settings as the title of holding Center and Down together.
+  [ROW_COMBO_FIRST + QuickLaunchComboSelectDown] = i18n_noop("Hold Center + Down"),
 };
 
 static const char *s_category_row_titles[CategoryRowCount] = {
@@ -117,6 +130,12 @@ static void prv_update_app_names(QuickLaunchData *data) {
                           data->app_names[ROW_HOLD_DOWN], APP_NAME_SIZE_BYTES);
   prv_get_subtitle_string(quick_launch_get_app(BUTTON_ID_BACK), data,
                           data->app_names[ROW_HOLD_BACK], APP_NAME_SIZE_BYTES);
+
+  // Two-button combos
+  for (QuickLaunchCombo combo = 0; combo < QuickLaunchComboCount; combo++) {
+    prv_get_subtitle_string(quick_launch_combo_get_app(combo), data,
+                            data->app_names[ROW_COMBO_FIRST + combo], APP_NAME_SIZE_BYTES);
+  }
 }
 
 static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Layer *cell_layer,
@@ -151,8 +170,7 @@ static uint16_t prv_get_initial_selection_cb(SettingsCallbacks *context) {
 
 //! The row to start on, which is the category the button is currently bound to.
 static QuickLaunchCategoryRow prv_get_category_row(QuickLaunchData *data) {
-  const AppInstallId app_id = data->is_tap ? quick_launch_single_click_get_app(data->button)
-                                           : quick_launch_get_app(data->button);
+  const AppInstallId app_id = quick_launch_binding_get_app(data->binding);
   AppInstallEntry entry;
   if ((app_id == INSTALL_ID_INVALID) || !app_install_get_entry_for_install_id(app_id, &entry)) {
     return CATEGORY_ROW_ACTIONS;
@@ -166,7 +184,7 @@ static void prv_category_menu_select(OptionMenu *option_menu, int selection, voi
   const QuickLaunchMenuCategory category = (selection == CATEGORY_ROW_ACTIONS)
                                                ? QuickLaunchMenuCategoryActions
                                                : QuickLaunchMenuCategoryApps;
-  quick_launch_app_menu_window_push(data->button, data->is_tap, category, &option_menu->window);
+  quick_launch_app_menu_window_push(data->binding, category, &option_menu->window);
 }
 
 static void prv_category_menu_push(QuickLaunchData *data) {
@@ -181,41 +199,36 @@ static void prv_category_menu_push(QuickLaunchData *data) {
 static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
   PBL_ASSERTN(row < NUM_ROWS);
 
-  ButtonId button;
-  bool is_tap;
-
+  QuickLaunchBinding binding;
   switch (row) {
     case ROW_TAP_UP:
-      button = BUTTON_ID_UP;
-      is_tap = true;
+      binding = (QuickLaunchBinding){.type = QuickLaunchBindingTap, .button = BUTTON_ID_UP};
       break;
     case ROW_TAP_DOWN:
-      button = BUTTON_ID_DOWN;
-      is_tap = true;
+      binding = (QuickLaunchBinding){.type = QuickLaunchBindingTap, .button = BUTTON_ID_DOWN};
       break;
     case ROW_HOLD_UP:
-      button = BUTTON_ID_UP;
-      is_tap = false;
+      binding = (QuickLaunchBinding){.type = QuickLaunchBindingHold, .button = BUTTON_ID_UP};
       break;
     case ROW_HOLD_SELECT:
-      button = BUTTON_ID_SELECT;
-      is_tap = false;
+      binding = (QuickLaunchBinding){.type = QuickLaunchBindingHold, .button = BUTTON_ID_SELECT};
       break;
     case ROW_HOLD_DOWN:
-      button = BUTTON_ID_DOWN;
-      is_tap = false;
+      binding = (QuickLaunchBinding){.type = QuickLaunchBindingHold, .button = BUTTON_ID_DOWN};
       break;
     case ROW_HOLD_BACK:
-      button = BUTTON_ID_BACK;
-      is_tap = false;
+      binding = (QuickLaunchBinding){.type = QuickLaunchBindingHold, .button = BUTTON_ID_BACK};
       break;
     default:
-      return;
+      binding = (QuickLaunchBinding){
+        .type = QuickLaunchBindingCombo,
+        .combo = (QuickLaunchCombo)(row - ROW_COMBO_FIRST)
+      };
+      break;
   }
 
   QuickLaunchData *data = (QuickLaunchData *)context;
-  data->button = button;
-  data->is_tap = is_tap;
+  data->binding = binding;
   prv_category_menu_push(data);
 }
 

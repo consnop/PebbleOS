@@ -59,8 +59,8 @@ PBL_LOG_MODULE_DEFINE(service_app_cache, CONFIG_SERVICE_APP_CACHE_LOG_LEVEL);
 #define LAUNCH_BONUS_PER_LAUNCH_S (24 * 60 * 60)
 #define LAUNCH_BONUS_MAX_LAUNCHES (30)
 
-// 8 quick launch apps, 1 default watchface, 1 default worker
-#define DO_NOT_EVICT_LIST_SIZE (10)
+// 12 quick launch apps, 1 default watchface, 1 default worker
+#define DO_NOT_EVICT_LIST_SIZE (14)
 
 // the running app and worker
 #define NEVER_EVICT_LIST_SIZE (2)
@@ -291,8 +291,12 @@ status_t app_cache_free_up_space(uint32_t bytes_needed) {
             quick_launch_get_app(BUTTON_ID_BACK),
             quick_launch_single_click_get_app(BUTTON_ID_UP),
             quick_launch_single_click_get_app(BUTTON_ID_DOWN),
-            quick_launch_combo_back_up_get_app(),
-            quick_launch_combo_up_down_get_app(),
+            quick_launch_combo_get_app(QuickLaunchComboBackUp),
+            quick_launch_combo_get_app(QuickLaunchComboUpDown),
+            quick_launch_combo_get_app(QuickLaunchComboBackSelect),
+            quick_launch_combo_get_app(QuickLaunchComboBackDown),
+            quick_launch_combo_get_app(QuickLaunchComboUpSelect),
+            quick_launch_combo_get_app(QuickLaunchComboSelectDown),
 #endif
             watchface_get_default_install_id(),
             worker_preferences_get_default_worker(),
