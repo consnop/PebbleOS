@@ -1,0 +1,197 @@
+name: Patched firmware
+
+# Applies patches/*.patch to an upstream coredevices/PebbleOS release, builds it for the watch,
+# and publishes the bundle as a release of this repo named <upstream tag>-consnop-<patch id>.
+# The watch reports that same name as its firmware version.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"   # daily: picks up new upstream releases
+  push:
+    branches: [pipeline]
+    paths: ["patches/**", "pipeline.env", ".github/workflows/firmware.yml"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (default: per pipeline.env)"
+        required: false
+      force:
+        description: "Rebuild even if that release already exists"
+        type: boolean
+        default: false
+
+concurrency:
+  group: firmware
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      release: ${{ steps.plan.outputs.release }}
+      image: ${{ steps.plan.outputs.image }}
+      board: ${{ steps.plan.outputs.board }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          . ./pipeline.env
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            tags=$(gh api --paginate "repos/coredevices/PebbleOS/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+              | grep -E '^v[0-9]+\.[0-9]{2,}\.[0-9]+$' || true)
+            if [ "$TRACK" != latest ]; then
+              tags=$(printf '%s\n' "$tags" | grep -F -- "$TRACK" | grep -E "^$(printf '%s' "$TRACK" | sed 's/\./\\./g')" || true)
+            fi
+            tag=$(printf '%s\n' "$tags" | sort -V | tail -1)
+          fi
+          [ -n "$tag" ] || { echo "::error::no upstream release matches TRACK=$TRACK"; exit 1; }
+
+          patch_id=$(cat patches/*.patch | sha256sum | cut -c1-8)
+          release="${tag}-consnop-${patch_id}"
+
+          # Build in the same image upstream's CI used for that tag.
+          image=$(curl -fsSL "https://raw.githubusercontent.com/coredevices/PebbleOS/${tag}/.github/workflows/build-firmware.yml" \
+            | grep -o -m1 'ghcr.io/coredevices/pebbleos-docker:[A-Za-z0-9._-]*')
+
+          build=true
+          if [ "${FORCE:-false}" != true ] && gh release view "$release" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            build=false
+            echo "Release $release already exists, nothing to do."
+          fi
+          {
+            echo "tag=$tag"; echo "release=$release"; echo "image=$image"
+            echo "board=$BOARD"; echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+          echo "### $release" >> "$GITHUB_STEP_SUMMARY"
+          echo "upstream \`$tag\`, image \`$image\`, board \`$BOARD\`, build: $build" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ needs.plan.outputs.image }}
+    outputs:
+      patches_applied: ${{ steps.am.outcome == 'success' }}
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      RELEASE: ${{ needs.plan.outputs.release }}
+      BOARD: ${{ needs.plan.outputs.board }}
+    steps:
+      - run: git config --system --add safe.directory '*'
+
+      - uses: actions/checkout@v7
+        with:
+          path: pipeline
+
+      - uses: actions/checkout@v7
+        with:
+          repository: coredevices/PebbleOS
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
+          path: src
+          submodules: true
+
+      - name: Apply patches
+        id: am
+        working-directory: src
+        run: |
+          git config user.name "consnop pipeline"
+          git config user.email "consnop@users.noreply.github.com"
+          git am --3way ../pipeline/patches/*.patch
+          # An annotated tag at HEAD makes `git describe`, and so the firmware version, the release name.
+          git tag -a "$RELEASE" -m "$RELEASE"
+          git log --oneline -n "$(ls ../pipeline/patches/*.patch | wc -l)"
+
+      - name: Install Python dependencies
+        working-directory: src
+        run: |
+          pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Build
+        working-directory: src
+        run: |
+          pbl configure --board "$BOARD" -DCONFIG_FIRMWARE_SLOT=0 -DCONFIG_RELEASE=y
+          pbl build
+          pbl bundle
+
+      - name: Collect
+        working-directory: src
+        run: |
+          name=$(printf '%s' "$BOARD" | tr @ _)
+          mkdir ../out
+          cp build/normal_"${name}"_*.pbz ../out/
+          cp build/pebbleos.elf "../out/firmware_${name}_${RELEASE}_slot0.elf"
+          cp build/pebbleos_loghash_dict.json "../out/firmware_${name}_${RELEASE}_slot0_loghash_dict.json"
+          ls -la ../out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware
+          path: out
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: firmware
+          path: out
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE: ${{ needs.plan.outputs.release }}
+          BOARD: ${{ needs.plan.outputs.board }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Upstream [\`$TAG\`](https://github.com/coredevices/PebbleOS/releases/tag/$TAG) for \`$BOARD\`, with these patches:"
+            echo
+            for p in patches/*.patch; do echo "- $(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$p" | head -1)"; done
+            echo
+            echo "Flash the \`.pbz\` through the phone (Dev Connection on, then \`pbl run -r phone\`), or with"
+            echo "\`pebble fw install\`. The watch reports \`$RELEASE\` as its firmware version."
+          } > notes.md
+          gh release delete "$RELEASE" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$RELEASE" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$RELEASE" --notes-file notes.md
+
+  conflict:
+    needs: [plan, build]
+    if: failure() && needs.build.outputs.patches_applied != 'true' && needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Patches don't apply to $TAG"
+          if gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[].number' | grep -q .; then
+            echo "Issue already open."; exit 0
+          fi
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label needs-owner --body \
+            "\`git am\` failed applying \`patches/\` to upstream \`$TAG\`. Run: $RUN_URL
+
+          Rebase the patches onto \`$TAG\`, regenerate them with \`git format-patch\`, and push to the \`pipeline\` branch." \
+            || gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "\`git am\` failed on \`$TAG\`. Run: $RUN_URL"
