@@ -192,9 +192,25 @@ jobs:
             echo "\`normal_<board>_<tag>.pbz\`). Over USB, flash the \`_slot0.pbz\` through recovery with"
             echo "\`pbl run -r phone\`. The watch reports \`$RELEASE\` as its firmware version."
           } > notes.md
+          # Gravel reads this through releases/latest/download/, which GitHub's per-IP API quota
+          # (60 an hour unauthenticated, shared by everyone behind a carrier NAT) doesn't cover.
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, time
+          release, board = os.environ["RELEASE"], os.environ["BOARD"].replace("@", "_")
+          pbz = pathlib.Path(f"out/normal_{board}_{release}.pbz")
+          feed = {
+              "version": 1,
+              "tag": release,
+              "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "builds": {board: {"name": pbz.name, "size": pbz.stat().st_size,
+                                 "sha256": hashlib.sha256(pbz.read_bytes()).hexdigest()}},
+          }
+          pathlib.Path("out/firmware-feed.json").write_text(json.dumps(feed, indent=2) + "\n")
+          PY
+          cat out/firmware-feed.json
           gh release delete "$RELEASE" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$RELEASE" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "$RELEASE" --notes-file notes.md
+            --title "$RELEASE" --notes-file notes.md --latest
       # A rebase that builds and releases resolves the conflict issue for this tag.
       - env:
           GH_TOKEN: ${{ github.token }}
