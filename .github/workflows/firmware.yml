@@ -145,7 +145,16 @@ jobs:
           for slot in 0 1; do
             cp "build$slot/pebbleos.elf" "../out/firmware_${name}_${RELEASE}_slot$slot.elf"
           done
-          cp build0/pebbleos_loghash_dict.json "../out/firmware_${name}_${RELEASE}_loghash_dict.json"
+          # The log dictionary (decodes hashed watch logs) was renamed in v4.46.0; it's only a debugging aid.
+          dict=""
+          for f in build0/log.dict.json build0/pebbleos_loghash_dict.json; do
+            if [ -f "$f" ]; then dict="$f"; break; fi
+          done
+          if [ -n "$dict" ]; then
+            cp "$dict" "../out/firmware_${name}_${RELEASE}_loghash_dict.json"
+          else
+            echo "::warning::no log dictionary found in build0/"
+          fi
           ls -la ../out
 
       - uses: actions/upload-artifact@v7
