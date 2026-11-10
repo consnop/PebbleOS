@@ -185,7 +185,7 @@ jobs:
           {
             echo "Upstream [\`$TAG\`](https://github.com/coredevices/PebbleOS/releases/tag/$TAG) for \`$BOARD\`, with these patches:"
             echo
-            for p in patches/*.patch; do echo "- $(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$p" | head -1)"; done
+            for p in patches/*.patch; do echo "- $(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$p" | sed -n 1p)"; done
             echo
             echo "Gravel built with the consnop patches offers this as a normal firmware update (the merged"
             echo "\`normal_<board>_<tag>.pbz\`). Over USB, flash the \`_slot0.pbz\` through recovery with"
