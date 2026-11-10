@@ -64,8 +64,10 @@ jobs:
           release="${tag}-consnop-${patch_id}"
 
           # Build in the same image upstream's CI used for that tag.
-          image=$(curl -fsSL "https://raw.githubusercontent.com/coredevices/PebbleOS/${tag}/.github/workflows/build-firmware.yml" \
-            | grep -o -m1 'ghcr.io/coredevices/pebbleos-docker:[A-Za-z0-9._-]*')
+          # Download first, then search: grep -m1 closing the pipe early fails curl (exit 23) under pipefail.
+          upstream_wf=$(curl -fsSL "https://raw.githubusercontent.com/coredevices/PebbleOS/${tag}/.github/workflows/build-firmware.yml")
+          image=$(grep -o 'ghcr.io/coredevices/pebbleos-docker:[A-Za-z0-9._-]*' <<< "$upstream_wf" | sed -n 1p)
+          [ -n "$image" ] || { echo "::error::no pebbleos-docker image in upstream's build-firmware.yml at $tag"; exit 1; }
 
           build=true
           if [ "${FORCE:-false}" != true ] && gh release view "$release" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
