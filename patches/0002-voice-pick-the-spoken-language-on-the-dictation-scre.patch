@@ -1,0 +1,620 @@
+From 3f0bacb1b69e4fe2b58d06cc91d99c1ced9121cc Mon Sep 17 00:00:00 2001
+From: consnop <consnop@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 15:09:27 +0100
+Subject: [PATCH 2/2] voice: pick the spoken language on the dictation screen
+
+Phone-side transcription with auto-detection often guesses the wrong
+language for short phrases. The dictation screen now shows an SK / EN / DE
+row under the status bar; Up and Down cycle it, wrapping around, at any
+point while the screen is up. The choice is kept in the dictationLanguage
+pref (default English) and sent to the phone:
+
+- with the session setup, as attribute 0x40 holding the two-letter
+  ISO 639-1 code;
+- when it changes during a session, as voice endpoint message 0x40
+  (flags, session id, attribute list with the same attribute).
+
+Both ids are outside upstream's ranges. Phones that don't know them ignore
+the attribute; the message is new and only consnop's Gravel handles it.
+
+VoiceWindow keeps its applib_malloc size: the row's layer is allocated
+separately and its padding absorbs the new pointer and byte. The pref is
+written from the system work queue rather than the app's syscall.
+
+Assisted-by: LLM
+Signed-off-by: consnop <consnop@users.noreply.github.com>
+---
+ include/pbl/services/voice/voice.h            | 25 +++++++
+ include/pbl/services/voice_endpoint.h         | 22 +++++++
+ include/pbl/services/voice_endpoint_private.h | 16 +++++
+ pebble/applib/applib_malloc.json              |  2 +-
+ pebble/applib/voice/voice_window.c            | 65 +++++++++++++++++++
+ pebble/applib/voice/voice_window_private.h    |  5 ++
+ pebble/services/voice/voice.c                 | 51 ++++++++++++++-
+ pebble/services/voice_endpoint/service.c      | 34 +++++++++-
+ pebble/shell/normal/prefs.c                   | 18 +++++
+ pebble/shell/normal/prefs_values.h.inc        |  1 +
+ pebble/shell/prefs.h                          |  4 ++
+ pebble/shell/prf/stubs.c                      |  8 +++
+ pebble/shell/sdk/stubs.c                      |  8 +++
+ tests/pebble/services/test_voice_endpoint.c   | 53 +++++++++++++++
+ 14 files changed, 308 insertions(+), 4 deletions(-)
+
+diff --git a/include/pbl/services/voice/voice.h b/include/pbl/services/voice/voice.h
+index a6f22ee..f0f4432 100644
+--- a/include/pbl/services/voice/voice.h
++++ b/include/pbl/services/voice/voice.h
+@@ -110,6 +110,31 @@ void voice_cancel_dictation(VoiceSessionId session_id);
+ /** @brief Initialize the voice service. */
+ void voice_init(void);
+ 
++/** @brief Spoken language of dictation, picked on the dictation screen. */
++typedef enum {
++  VoiceLanguageSlovak,
++  VoiceLanguageEnglish,
++  VoiceLanguageGerman,
++  VoiceLanguageCount,
++} VoiceLanguage;
++
++/** @brief The spoken language sent with each dictation session, kept across reboots. */
++VoiceLanguage voice_get_language(void);
++
++/**
++ * @brief Change the spoken language.
++ *
++ * A session already set up with the phone is told about the change, so it applies to the
++ * recording in progress as long as the phone has not started transcribing it.
++ */
++void voice_set_language(VoiceLanguage language);
++
++/** @brief Syscall wrapper of voice_get_language(). */
++VoiceLanguage sys_voice_get_language(void);
++
++/** @brief Syscall wrapper of voice_set_language(). */
++void sys_voice_set_language(VoiceLanguage language);
++
+ /**
+  * @brief Handle a session setup result received by the voice endpoint.
+  *
+diff --git a/include/pbl/services/voice_endpoint.h b/include/pbl/services/voice_endpoint.h
+index b4ea391..ad25a57 100644
+--- a/include/pbl/services/voice_endpoint.h
++++ b/include/pbl/services/voice_endpoint.h
+@@ -82,4 +82,26 @@ void voice_endpoint_setup_session(VoiceEndpointSessionType session_type,
+                                   AudioEndpointSessionId session_id, AudioTransferInfoSpeex *info,
+                                   Uuid *app_uuid);
+ 
++/** @brief Length of a spoken language code: ISO 639-1, sent without terminator. */
++#define VOICE_LANGUAGE_CODE_LEN (2)
++
++/**
++ * @brief Like voice_endpoint_setup_session(), also telling the phone the spoken language.
++ *
++ * @param language #VOICE_LANGUAGE_CODE_LEN letter ISO 639-1 code, or nullptr to let the phone
++ *                 detect it.
++ */
++void voice_endpoint_setup_session_with_language(VoiceEndpointSessionType session_type,
++                                                AudioEndpointSessionId session_id,
++                                                AudioTransferInfoSpeex *info, Uuid *app_uuid,
++                                                const char *language);
++
++/**
++ * @brief Tell the phone the spoken language of a session changed while it was recording.
++ *
++ * @param session_id Audio endpoint session of the session.
++ * @param language #VOICE_LANGUAGE_CODE_LEN letter ISO 639-1 code.
++ */
++void voice_endpoint_send_language(AudioEndpointSessionId session_id, const char *language);
++
+ /** @} */
+diff --git a/include/pbl/services/voice_endpoint_private.h b/include/pbl/services/voice_endpoint_private.h
+index a253c14..a4ab772 100644
+--- a/include/pbl/services/voice_endpoint_private.h
++++ b/include/pbl/services/voice_endpoint_private.h
+@@ -21,6 +21,8 @@ typedef enum {
+   MsgIdDictationResult = 0x02,
+   /** NLP result, from the phone. */
+   MsgIdNLPResult = 0x03,
++  /** Spoken language changed during a session, from the watch. Outside the upstream range. */
++  MsgIdSessionLanguage = 0x40,
+ } MsgId;
+ 
+ /** @brief Attribute identifier in voice endpoint messages. */
+@@ -37,6 +39,8 @@ typedef enum {
+   VEAttributeIdReminder = 0x04,
+   /** 32-bit timestamp of an NLP result. */
+   VEAttributeIdTimestamp = 0x05,
++  /** Spoken language, two-letter ISO 639-1 code without terminator. Outside the upstream range. */
++  VEAttributeIdLanguage = 0x40,
+ } VEAttributeId;
+ 
+ /** @brief Message flags. */
+@@ -96,4 +100,16 @@ typedef struct PBL_PACKED {
+   struct pbl_generic_attr_list attr_list;
+ } VoiceSessionResultMsg;
+ 
++/** @brief Spoken language of a session in flight, from the watch. */
++typedef struct PBL_PACKED {
++  /** #MsgIdSessionLanguage. */
++  MsgId msg_id : 8;
++  /** Flags. */
++  VEFlags flags;
++  /** Audio endpoint session. */
++  AudioEndpointSessionId session_id;
++  /** Attributes: the language. */
++  struct pbl_generic_attr_list attr_list;
++} SessionLanguageMsg;
++
+ /** @} */
+diff --git a/pebble/applib/applib_malloc.json b/pebble/applib/applib_malloc.json
+index 125af06..7c21280 100644
+--- a/pebble/applib/applib_malloc.json
++++ b/pebble/applib/applib_malloc.json
+@@ -254,7 +254,7 @@
+         "_comment": "Generously padded because it's not feature complete yet (only 3.x)"
+     }, {
+         "name": "VoiceWindow",
+-        "size_3x_padding": 31,
++        "size_3x_padding": 23,
+         "size_3x": 2384,
+         "dependencies": ["TranscriptionDialog", "Layer", "Layer", "StatusBarLayer", "TextLayer", 
+                          "KinoLayer", "Window", "EventServiceInfo"],
+diff --git a/pebble/applib/voice/voice_window.c b/pebble/applib/voice/voice_window.c
+index dd27693..0ddd3a8 100644
+--- a/pebble/applib/voice/voice_window.c
++++ b/pebble/applib/voice/voice_window.c
+@@ -887,6 +887,58 @@ static void prv_shrink_progress_bar(VoiceUiData *data) {
+   animation_schedule((Animation *)data->mic_window.progress_anim);
+ }
+ 
++static const char *const s_language_labels[VoiceLanguageCount] = {
++  [VoiceLanguageSlovak] = "SK",
++  [VoiceLanguageEnglish] = "EN",
++  [VoiceLanguageGerman] = "DE",
++};
++
++#define LANGUAGE_CELL_SIZE  ((GSize){.w = 46, .h = 30})
++#define LANGUAGE_CELL_GAP   (6)
++#define LANGUAGE_ROW_MARGIN (6)
++
++static void prv_language_layer_update_proc(Layer *layer, GContext *ctx) {
++  VoiceUiData *data = window_get_user_data(layer_get_window(layer));
++  const GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
++  const GSize cell = LANGUAGE_CELL_SIZE;
++  const int16_t row_w = VoiceLanguageCount * cell.w + (VoiceLanguageCount - 1) * LANGUAGE_CELL_GAP;
++  GRect frame = {.origin.x = (layer->bounds.size.w - row_w) / 2, .size = cell};
++  for (VoiceLanguage language = 0; language < VoiceLanguageCount; language++) {
++    const bool selected = (language == data->mic_window.language);
++    if (selected) {
++      graphics_context_set_fill_color(ctx, GColorBlack);
++      graphics_fill_round_rect(ctx, &frame, 4, GCornersAll);
++    }
++    graphics_context_set_text_color(
++        ctx, selected ? GColorWhite : PBL_IF_COLOR_ELSE(GColorDarkGray, GColorBlack));
++    // Gothic's ascent leaves room above the caps; lift the text to centre them in the cell
++    GRect text_frame = grect_inset(frame, GEdgeInsets(-4, 0, 0, 0));
++    graphics_draw_text(ctx, s_language_labels[language], font, text_frame,
++                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, nullptr);
++    frame.origin.x += cell.w + LANGUAGE_CELL_GAP;
++  }
++}
++
++// Up and Down cycle the spoken language, at any point while the mic window is up
++static void prv_language_click_handler(ClickRecognizerRef recognizer, void *context) {
++  VoiceUiData *data = context;
++  const int step = (click_recognizer_get_button_id(recognizer) == BUTTON_ID_UP) ? -1 : 1;
++  const VoiceLanguage language =
++      (VoiceLanguage)((data->mic_window.language + VoiceLanguageCount + step) % VoiceLanguageCount);
++  data->mic_window.language = language;
++  sys_voice_set_language(language);
++  if (data->mic_window.language_layer) {
++    layer_mark_dirty(data->mic_window.language_layer);
++  }
++}
++
++static void prv_language_click_config(void *context) {
++  window_set_click_context(BUTTON_ID_UP, context);
++  window_single_click_subscribe(BUTTON_ID_UP, &prv_language_click_handler);
++  window_set_click_context(BUTTON_ID_DOWN, context);
++  window_single_click_subscribe(BUTTON_ID_DOWN, &prv_language_click_handler);
++}
++
+ static void prv_mic_click_handler(ClickRecognizerRef recognizer, void *context) {
+   VoiceUiData *data = context;
+   ButtonId button_id = click_recognizer_get_button_id(recognizer);
+@@ -905,6 +957,7 @@ static void prv_mic_click_handler(ClickRecognizerRef recognizer, void *context)
+ }
+ 
+ static void prv_back_select_click_config_provider(void *context) {
++  prv_language_click_config(context);
+   window_set_click_context(BUTTON_ID_BACK, context);
+   window_single_click_subscribe(BUTTON_ID_BACK, &prv_mic_click_handler);
+   window_set_click_context(BUTTON_ID_SELECT, context);
+@@ -912,6 +965,7 @@ static void prv_back_select_click_config_provider(void *context) {
+ }
+ 
+ static void prv_back_click_config_provider(void *context) {
++  prv_language_click_config(context);
+   window_set_click_context(BUTTON_ID_BACK, context);
+   window_single_click_subscribe(BUTTON_ID_BACK, &prv_mic_click_handler);
+ }
+@@ -1217,6 +1271,15 @@ static void prv_mic_window_load(Window *window) {
+   layer_add_child(&window->layer, (Layer *)loading_layer);
+   layer_set_hidden((Layer *)loading_layer, true);
+ 
++  data->mic_window.language = sys_voice_get_language();
++  Layer *language_layer = layer_create(GRect(0, STATUS_BAR_LAYER_HEIGHT + LANGUAGE_ROW_MARGIN,
++                                             root_frame->size.w, LANGUAGE_CELL_SIZE.h));
++  if (language_layer) {
++    layer_set_update_proc(language_layer, prv_language_layer_update_proc);
++    layer_add_child(root_layer, language_layer);
++  }
++  data->mic_window.language_layer = language_layer;
++
+   StatusBarLayer *status_bar = &data->mic_window.status_bar;
+   status_bar_layer_init(status_bar);
+   const GColor status_bg_color = PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite);
+@@ -1283,6 +1346,8 @@ static void prv_mic_window_unload(Window *window) {
+   kino_layer_deinit(&data->mic_window.icon_layer);
+   loading_layer_deinit(&data->mic_window.progress_bar);
+   layer_deinit(&data->mic_window.mic_dot_layer);
++  layer_destroy(data->mic_window.language_layer);
++  data->mic_window.language_layer = nullptr;
+   text_layer_deinit(&data->mic_window.text_layer);
+   status_bar_layer_deinit(&data->mic_window.status_bar);
+   event_service_client_unsubscribe(&data->voice_event_sub);
+diff --git a/pebble/applib/voice/voice_window_private.h b/pebble/applib/voice/voice_window_private.h
+index e6cb3bc..fa4b662 100644
+--- a/pebble/applib/voice/voice_window_private.h
++++ b/pebble/applib/voice/voice_window_private.h
+@@ -8,6 +8,8 @@
+ 
+ #include <stdint.h>
+ 
++#include <pbl/services/voice/voice.h>
++
+ #include <applib/app_timer.h>
+ #include <applib/event_service_client.h>
+ #include <applib/ui/animation.h>
+@@ -49,6 +51,9 @@ typedef struct VoiceUiData {
+     LoadingLayer progress_bar;
+     PropertyAnimation *progress_anim;
+     PropertyAnimation *fly_anim;
++    // Heap-allocated: VoiceWindow's size is fixed by applib_malloc.json
++    Layer *language_layer;
++    uint8_t language; // VoiceLanguage
+   } mic_window;
+ 
+   union {
+diff --git a/pebble/services/voice/voice.c b/pebble/services/voice/voice.c
+index a4681d5..f0be236 100644
+--- a/pebble/services/voice/voice.c
++++ b/pebble/services/voice/voice.c
+@@ -25,6 +25,7 @@
+ 
+ #include <kernel/events.h>
+ #include <process_management/app_manager.h>
++#include <shell/prefs.h>
+ 
+ PBL_LOG_MODULE_DEFINE(service_voice, CONFIG_SERVICE_VOICE_LOG_LEVEL);
+ 
+@@ -56,6 +57,16 @@ static Uuid s_app_uuid;
+ 
+ static AudioEndpointSessionId s_session_id = AUDIO_ENDPOINT_SESSION_INVALID_ID;
+ 
++static const char s_language_codes[VoiceLanguageCount][VOICE_LANGUAGE_CODE_LEN] = {
++  [VoiceLanguageSlovak] = {'s', 'k'},
++  [VoiceLanguageEnglish] = {'e', 'n'},
++  [VoiceLanguageGerman] = {'d', 'e'},
++};
++static VoiceLanguage s_language = VoiceLanguageCount; // VoiceLanguageCount: not read from prefs yet
++
++static void prv_store_language(struct pbl_work *work);
++static PBL_WORK_DEFINE(s_store_language_work, prv_store_language);
++
+ static void prv_session_setup_timeout(struct pbl_work *work);
+ static void prv_session_result_timeout(struct pbl_work *work);
+ static PBL_DELAYED_WORK_DEFINE(s_setup_timeout, prv_session_setup_timeout);
+@@ -441,8 +452,9 @@ VoiceSessionId voice_start_dictation(VoiceEndpointSessionType session_type) {
+ 
+   PBL_LOG_INFO("Send session setup message. Session type: %d", session_type);
+   PBL_LOG_DBG("Calling voice_endpoint_setup_session");
+-  voice_endpoint_setup_session(session_type, s_session_id, &transfer_info,
+-                               s_from_app ? &s_app_uuid : nullptr);
++  voice_endpoint_setup_session_with_language(session_type, s_session_id, &transfer_info,
++                                             s_from_app ? &s_app_uuid : nullptr,
++                                             s_language_codes[voice_get_language()]);
+ 
+   s_timeout_generation = s_session_generation;
+   pbl_delayed_work_cancel(&s_result_timeout);
+@@ -751,6 +763,41 @@ unlock:
+   pbl_mutex_unlock(&s_lock);
+ }
+ 
++VoiceLanguage voice_get_language(void) {
++  if (s_language >= VoiceLanguageCount) {
++    const uint8_t stored = shell_prefs_get_dictation_language();
++    s_language = (stored < VoiceLanguageCount) ? (VoiceLanguage)stored : VoiceLanguageEnglish;
++  }
++  return s_language;
++}
++
++// Settings file writes happen off the caller's task: the caller may be an app on its own stack.
++static void prv_store_language(struct pbl_work *work) {
++  shell_prefs_set_dictation_language(voice_get_language());
++}
++
++void voice_set_language(VoiceLanguage language) {
++  if (language >= VoiceLanguageCount) {
++    return;
++  }
++  pbl_mutex_lock(&s_lock, PBL_FOREVER);
++  s_language = language;
++  // Every state past Idle has sent its setup message (voice_start_dictation holds the lock)
++  if ((s_state != SessionState_Idle) && (s_session_id != AUDIO_ENDPOINT_SESSION_INVALID_ID)) {
++    voice_endpoint_send_language(s_session_id, s_language_codes[language]);
++  }
++  pbl_mutex_unlock(&s_lock);
++  pbl_work_submit(&pbl_sys_workq, &s_store_language_work);
++}
++
++PBL_SYSCALL(VoiceLanguage, sys_voice_get_language) {
++  return voice_get_language();
++}
++
++PBL_SYSCALL(void, sys_voice_set_language, (VAL, VoiceLanguage, language)) {
++  voice_set_language(language);
++}
++
+ PBL_SYSCALL(VoiceSessionId, sys_voice_start_dictation,
+             (VAL, VoiceEndpointSessionType, session_type)) {
+   if ((session_type >= VoiceEndpointSessionTypeCount) ||
+diff --git a/pebble/services/voice_endpoint/service.c b/pebble/services/voice_endpoint/service.c
+index b9a01a3..42c1193 100644
+--- a/pebble/services/voice_endpoint/service.c
++++ b/pebble/services/voice_endpoint/service.c
+@@ -216,6 +216,13 @@ void voice_endpoint_protocol_msg_callback(struct pbl_pp_session *session, const
+ void voice_endpoint_setup_session(VoiceEndpointSessionType session_type,
+                                   AudioEndpointSessionId session_id, AudioTransferInfoSpeex *info,
+                                   Uuid *app_uuid) {
++  voice_endpoint_setup_session_with_language(session_type, session_id, info, app_uuid, nullptr);
++}
++
++void voice_endpoint_setup_session_with_language(VoiceEndpointSessionType session_type,
++                                                AudioEndpointSessionId session_id,
++                                                AudioTransferInfoSpeex *info, Uuid *app_uuid,
++                                                const char *language) {
+   struct pbl_pp_session *comm_session = pbl_pp_session_get_system();
+   pbl_pp_session_set_responsiveness(comm_session, PBL_BT_CONSUMER_PP_VOICE_ENDPOINT,
+                                     PBL_BT_RESPONSE_TIME_MIN,
+@@ -224,7 +231,8 @@ void voice_endpoint_setup_session(VoiceEndpointSessionType session_type,
+   // We're only sending one attribute now: the speex audio transfer info packet
+   size_t size = sizeof(SessionSetupMsg) + sizeof(struct pbl_generic_attr) +
+                 sizeof(AudioTransferInfoSpeex) +
+-                (app_uuid ? (sizeof(Uuid) + sizeof(struct pbl_generic_attr)) : 0);
++                (app_uuid ? (sizeof(Uuid) + sizeof(struct pbl_generic_attr)) : 0) +
++                (language ? (VOICE_LANGUAGE_CODE_LEN + sizeof(struct pbl_generic_attr)) : 0);
+   SessionSetupMsg *msg = pbl_malloc_check(size);
+   *msg = (SessionSetupMsg){
+     .msg_id = MsgIdSessionSetup,
+@@ -249,9 +257,33 @@ void voice_endpoint_setup_session(VoiceEndpointSessionType session_type,
+   attr = pbl_generic_attr_add(attr, VEAttributeIdAudioTransferInfoSpeex, info,
+                               sizeof(AudioTransferInfoSpeex));
+ 
++  if (language) {
++    msg->attr_list.num_attributes += 1;
++    attr = pbl_generic_attr_add(attr, VEAttributeIdLanguage, language, VOICE_LANGUAGE_CODE_LEN);
++  }
++
+   size_t actual_size = (uint8_t *)attr - (uint8_t *)msg;
+   PBL_ASSERTN(actual_size == size);
+ 
+   pbl_pp_send(comm_session, PBL_PP_ENDPOINT_VOICE, (uint8_t *)msg, size, PBL_PP_DEFAULT_TIMEOUT_MS);
+   pbl_free(msg);
+ }
++
++void voice_endpoint_send_language(AudioEndpointSessionId session_id, const char *language) {
++  struct pbl_pp_session *comm_session = pbl_pp_session_get_system();
++  if (!comm_session) {
++    return;
++  }
++  const size_t size =
++      sizeof(SessionLanguageMsg) + sizeof(struct pbl_generic_attr) + VOICE_LANGUAGE_CODE_LEN;
++  SessionLanguageMsg *msg = pbl_malloc_check(size);
++  *msg = (SessionLanguageMsg){
++    .msg_id = MsgIdSessionLanguage,
++    .session_id = session_id,
++    .attr_list.num_attributes = 1,
++  };
++  pbl_generic_attr_add(msg->attr_list.attributes, VEAttributeIdLanguage, language,
++                       VOICE_LANGUAGE_CODE_LEN);
++  pbl_pp_send(comm_session, PBL_PP_ENDPOINT_VOICE, (uint8_t *)msg, size, PBL_PP_DEFAULT_TIMEOUT_MS);
++  pbl_free(msg);
++}
+diff --git a/pebble/shell/normal/prefs.c b/pebble/shell/normal/prefs.c
+index a10ee23..da28060 100644
+--- a/pebble/shell/normal/prefs.c
++++ b/pebble/shell/normal/prefs.c
+@@ -12,6 +12,7 @@
+ #include <pbl/services/light.h>
+ #include <pbl/services/touch/touch.h>
+ #include <pbl/services/touch/touch_nav_service.h>
++#include <pbl/services/voice/voice.h>
+ #include <pbl/util/units.h>
+ 
+ #include <applib/graphics/gtypes.h>
+@@ -211,6 +212,10 @@ static bool s_language_english = false;
+ #define PREF_KEY_LANGUAGE "language"
+ static uint8_t s_language = ShellLanguageInstalledPack;
+ 
++// Spoken language of dictation, a VoiceLanguage the voice service validates
++#define PREF_KEY_DICTATION_LANGUAGE "dictationLanguage"
++static uint8_t s_dictation_language = VoiceLanguageEnglish;
++
+ typedef struct QuickLaunchPreference {
+   bool enabled;
+   Uuid uuid;
+@@ -685,6 +690,11 @@ static bool prv_set_s_language_english(bool *english) {
+ 
+ static void prv_pref_store(const char *key, const void *value, size_t val_len);
+ 
++static bool prv_set_s_dictation_language(uint8_t *language) {
++  s_dictation_language = *language;
++  return true;
++}
++
+ static bool prv_set_s_language(uint8_t *language) {
+   if (*language >= ShellLanguageCount) {
+     s_language = ShellLanguageInstalledPack;
+@@ -2555,3 +2565,11 @@ void shell_prefs_set_dark_mode_schedule(const DarkModeSchedule *schedule) {
+     prv_pref_set(PREF_KEY_DARK_MODE_SCHEDULE, schedule, sizeof(*schedule));
+   }
+ }
++
++uint8_t shell_prefs_get_dictation_language(void) {
++  return s_dictation_language;
++}
++
++void shell_prefs_set_dictation_language(uint8_t language) {
++  prv_pref_set(PREF_KEY_DICTATION_LANGUAGE, &language, sizeof(language));
++}
+diff --git a/pebble/shell/normal/prefs_values.h.inc b/pebble/shell/normal/prefs_values.h.inc
+index 6d7ba5b..04838a9 100644
+--- a/pebble/shell/normal/prefs_values.h.inc
++++ b/pebble/shell/normal/prefs_values.h.inc
+@@ -33,6 +33,7 @@
+   PREFS_MACRO(PREF_KEY_SYSTEM_TEXT_SIZE, s_system_text_size)
+   PREFS_MACRO(PREF_KEY_LANG_ENGLISH, s_language_english)
+   PREFS_MACRO(PREF_KEY_LANGUAGE, s_language)
++  PREFS_MACRO(PREF_KEY_DICTATION_LANGUAGE, s_dictation_language)
+   PREFS_MACRO(PREF_KEY_QUICK_LAUNCH_UP, s_quick_launch_up)
+   PREFS_MACRO(PREF_KEY_QUICK_LAUNCH_DOWN, s_quick_launch_down)
+   PREFS_MACRO(PREF_KEY_QUICK_LAUNCH_SELECT, s_quick_launch_select)
+diff --git a/pebble/shell/prefs.h b/pebble/shell/prefs.h
+index e803901..f1d60d9 100644
+--- a/pebble/shell/prefs.h
++++ b/pebble/shell/prefs.h
+@@ -238,6 +238,10 @@ ShellLanguage shell_prefs_get_language(void);
+ uint32_t shell_prefs_get_language_resource_id(void);
+ void shell_prefs_set_language(ShellLanguage language);
+ 
++//! Spoken language picked on the dictation screen, a VoiceLanguage
++uint8_t shell_prefs_get_dictation_language(void);
++void shell_prefs_set_dictation_language(uint8_t language);
++
+ uint8_t timeline_prefs_get_settings_opened(void);
+ void timeline_prefs_set_settings_opened(uint8_t version);
+ void timeline_peek_prefs_set_enabled(bool enabled);
+diff --git a/pebble/shell/prf/stubs.c b/pebble/shell/prf/stubs.c
+index e699a36..efd0aa0 100644
+--- a/pebble/shell/prf/stubs.c
++++ b/pebble/shell/prf/stubs.c
+@@ -11,6 +11,7 @@
+ #include <pbl/services/notifications/alerts_private.h>
+ #include <pbl/services/notifications/do_not_disturb.h>
+ #include <pbl/services/persist.h>
++#include <pbl/services/voice/voice.h>
+ #include <pbl/util/uuid.h>
+ 
+ #include <kernel/events.h>
+@@ -357,3 +358,10 @@ void timeline_peek_handle_process_start(void) {
+ 
+ void timeline_peek_handle_process_kill(void) {
+ }
++
++uint8_t shell_prefs_get_dictation_language(void) {
++  return VoiceLanguageEnglish;
++}
++
++void shell_prefs_set_dictation_language(uint8_t language) {
++}
+diff --git a/pebble/shell/sdk/stubs.c b/pebble/shell/sdk/stubs.c
+index c9236c6..24edede 100644
+--- a/pebble/shell/sdk/stubs.c
++++ b/pebble/shell/sdk/stubs.c
+@@ -6,6 +6,7 @@
+ #include <pbl/drivers/backlight.h>
+ #include <pbl/services/activity/activity.h>
+ #include <pbl/services/timeline/peek.h>
++#include <pbl/services/voice/voice.h>
+ #include <pbl/util/units.h>
+ #include <pbl/util/uuid.h>
+ 
+@@ -208,3 +209,10 @@ uint8_t activity_prefs_heart_get_zone2_threshold(void) {
+ uint8_t activity_prefs_heart_get_zone3_threshold(void) {
+   return 172;
+ }
++
++uint8_t shell_prefs_get_dictation_language(void) {
++  return VoiceLanguageEnglish;
++}
++
++void shell_prefs_set_dictation_language(uint8_t language) {
++}
+diff --git a/tests/pebble/services/test_voice_endpoint.c b/tests/pebble/services/test_voice_endpoint.c
+index 3f4207a..c6012b2 100644
+--- a/tests/pebble/services/test_voice_endpoint.c
++++ b/tests/pebble/services/test_voice_endpoint.c
+@@ -254,6 +254,59 @@ void test_voice_endpoint__send_session_setup_app_initiated(void) {
+   fake_comm_session_process_send_next();
+ }
+ 
++static void prv_test_session_setup_with_language_msg(uint16_t endpoint_id, const uint8_t *data,
++                                                     unsigned int length) {
++  cl_assert_equal_i(endpoint_id, 11000);
++  const size_t speex_attr_len = sizeof(struct pbl_generic_attr) + sizeof(AudioTransferInfoSpeex);
++  cl_assert_equal_i(length, sizeof(SessionSetupMsg) + speex_attr_len +
++                                sizeof(struct pbl_generic_attr) + VOICE_LANGUAGE_CODE_LEN);
++
++  SessionSetupMsg *msg = (SessionSetupMsg *)data;
++  cl_assert_equal_i(msg->msg_id, MsgIdSessionSetup);
++  cl_assert_equal_i(msg->session_id, s_session_id);
++  cl_assert_equal_i(msg->attr_list.num_attributes, 2);
++
++  // The language follows the speex info, so phones that read attributes in order still see it first
++  const uint8_t expected_language_attr[] = {0x40, 0x02, 0x00, 's', 'k'};
++  cl_assert_equal_m((uint8_t *)msg->attr_list.attributes + speex_attr_len, expected_language_attr,
++                    sizeof(expected_language_attr));
++}
++
++void test_voice_endpoint__send_session_setup_with_language(void) {
++  fake_transport_set_sent_cb(s_transport, prv_test_session_setup_with_language_msg);
++
++  AudioTransferInfoSpeex transfer_info = (AudioTransferInfoSpeex){
++    .sample_rate = 16000,
++    .bit_rate = 12800,
++    .frame_size = 320,
++    .bitstream_version = 4
++  };
++  s_session_id = 7;
++  voice_endpoint_setup_session_with_language(VoiceEndpointSessionTypeDictation, s_session_id,
++                                             &transfer_info, nullptr, "sk");
++  fake_comm_session_process_send_next();
++}
++
++static void prv_test_language_msg(uint16_t endpoint_id, const uint8_t *data, unsigned int length) {
++  cl_assert_equal_i(endpoint_id, 11000);
++  const uint8_t expected[] = {
++    0x40,                   // Message ID: session language
++    0x00, 0x00, 0x00, 0x00, // flags
++    0x07, 0x00,             // session id
++    0x01,                   // attribute count
++    0x40, 0x02, 0x00,       // attribute id, length
++    'd',  'e',
++  };
++  cl_assert_equal_i(length, sizeof(expected));
++  cl_assert_equal_m(data, expected, sizeof(expected));
++}
++
++void test_voice_endpoint__send_language(void) {
++  fake_transport_set_sent_cb(s_transport, prv_test_language_msg);
++  voice_endpoint_send_language(7, "de");
++  fake_comm_session_process_send_next();
++}
++
+ void test_voice_endpoint__handle_setup_response(void) {
+   uint8_t setup_response[] = {
+     0x01,                   // Message ID: Session setup
+-- 
+2.55.0
+

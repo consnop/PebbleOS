@@ -1,7 +1,7 @@
-From 054279417ad814b7b1ee1abc6bb19eda22330590 Mon Sep 17 00:00:00 2001
+From 620fc42d2ff6b6bb1b97f4bac6b71021bfa2bc32 Mon Sep 17 00:00:00 2001
 From: consnop <consnop@users.noreply.github.com>
 Date: Sun, 8 Nov 2026 15:52:31 +0100
-Subject: [PATCH] shell: quick launch on every two-button combo
+Subject: [PATCH 1/2] shell: quick launch on every two-button combo
 
 Only Back+Up and Up+Down could be held together to launch an app, each
 copied through prefs, the watchface and the app cache. Replace the two
@@ -36,7 +36,7 @@ Signed-off-by: consnop <consnop@users.noreply.github.com>
  11 files changed, 281 insertions(+), 152 deletions(-)
 
 diff --git a/pebble/apps/system/settings/quick_launch.c b/pebble/apps/system/settings/quick_launch.c
-index bdba3acd0..c9183c1d1 100644
+index bdba3ac..c9183c1 100644
 --- a/pebble/apps/system/settings/quick_launch.c
 +++ b/pebble/apps/system/settings/quick_launch.c
 @@ -27,7 +27,8 @@
@@ -176,7 +176,7 @@ index bdba3acd0..c9183c1d1 100644
  }
  
 diff --git a/pebble/apps/system/settings/quick_launch_app_menu.c b/pebble/apps/system/settings/quick_launch_app_menu.c
-index 283851068..05d479f7c 100644
+index 2838510..05d479f 100644
 --- a/pebble/apps/system/settings/quick_launch_app_menu.c
 +++ b/pebble/apps/system/settings/quick_launch_app_menu.c
 @@ -22,8 +22,7 @@
@@ -303,7 +303,7 @@ index 283851068..05d479f7c 100644
        app_menu_data_source_get_index_of_app_with_install_id(&data->data_source, install_id);
  
 diff --git a/pebble/apps/system/settings/quick_launch_app_menu.h b/pebble/apps/system/settings/quick_launch_app_menu.h
-index 82dec87c7..6c9fdd494 100644
+index 82dec87..6c9fdd4 100644
 --- a/pebble/apps/system/settings/quick_launch_app_menu.h
 +++ b/pebble/apps/system/settings/quick_launch_app_menu.h
 @@ -13,9 +13,29 @@ typedef enum QuickLaunchMenuCategory {
@@ -341,7 +341,7 @@ index 82dec87c7..6c9fdd494 100644
 +void quick_launch_app_menu_window_push(QuickLaunchBinding binding, QuickLaunchMenuCategory category,
 +                                       Window *parent);
 diff --git a/pebble/services/app_cache/service.c b/pebble/services/app_cache/service.c
-index 844d320f7..c10b4273c 100644
+index 844d320..c10b427 100644
 --- a/pebble/services/app_cache/service.c
 +++ b/pebble/services/app_cache/service.c
 @@ -63,8 +63,8 @@ PBL_LOG_MODULE_DEFINE(service_app_cache, CONFIG_SERVICE_APP_CACHE_LOG_LEVEL);
@@ -371,7 +371,7 @@ index 844d320f7..c10b4273c 100644
              watchface_get_default_install_id(),
              worker_preferences_get_default_worker(),
 diff --git a/pebble/services/blob_db/settings_blob_db.c b/pebble/services/blob_db/settings_blob_db.c
-index 6bb05f68a..451263947 100644
+index 6bb05f6..4512639 100644
 --- a/pebble/services/blob_db/settings_blob_db.c
 +++ b/pebble/services/blob_db/settings_blob_db.c
 @@ -95,6 +95,10 @@ static const char *s_syncable_settings[] = {
@@ -386,7 +386,7 @@ index 6bb05f68a..451263947 100644
    // UI theming
    "settingsMenuHighlightColor",
 diff --git a/pebble/shell/normal/prefs.c b/pebble/shell/normal/prefs.c
-index 8447429cc..a10ee2327 100644
+index 8447429..a10ee23 100644
 --- a/pebble/shell/normal/prefs.c
 +++ b/pebble/shell/normal/prefs.c
 @@ -245,6 +245,10 @@ static QuickLaunchPreference s_quick_launch_back = {
@@ -557,7 +557,7 @@ index 8447429cc..a10ee2327 100644
  
  void watchface_set_default_install_id(AppInstallId app_id) {
 diff --git a/pebble/shell/normal/prefs_values.h.inc b/pebble/shell/normal/prefs_values.h.inc
-index 3f362965c..6d7ba5b1b 100644
+index 3f36296..6d7ba5b 100644
 --- a/pebble/shell/normal/prefs_values.h.inc
 +++ b/pebble/shell/normal/prefs_values.h.inc
 @@ -41,6 +41,10 @@
@@ -572,7 +572,7 @@ index 3f362965c..6d7ba5b1b 100644
    PREFS_MACRO(PREF_KEY_DEFAULT_WATCHFACE, s_default_watchface)
    PREFS_MACRO(PREF_KEY_WELCOME_VERSION, s_welcome_version)
 diff --git a/pebble/shell/normal/quick_launch.h b/pebble/shell/normal/quick_launch.h
-index 79783b898..c144bd35a 100644
+index 79783b8..c144bd3 100644
 --- a/pebble/shell/normal/quick_launch.h
 +++ b/pebble/shell/normal/quick_launch.h
 @@ -20,12 +20,21 @@ AppInstallId quick_launch_single_click_get_app(ButtonId button);
@@ -609,7 +609,7 @@ index 79783b898..c144bd35a 100644
 +void quick_launch_combo_set_enabled(QuickLaunchCombo combo, bool enabled);
 \ No newline at end of file
 diff --git a/pebble/shell/normal/watchface.c b/pebble/shell/normal/watchface.c
-index a98ff2342..585aaa468 100644
+index a98ff23..585aaa4 100644
 --- a/pebble/shell/normal/watchface.c
 +++ b/pebble/shell/normal/watchface.c
 @@ -25,14 +25,12 @@
@@ -752,7 +752,7 @@ index a98ff2342..585aaa468 100644
    }
  }
 diff --git a/tests/pebble/services/test_app_cache.c b/tests/pebble/services/test_app_cache.c
-index 4afe8724f..1d420e518 100644
+index 4afe872..1d420e5 100644
 --- a/tests/pebble/services/test_app_cache.c
 +++ b/tests/pebble/services/test_app_cache.c
 @@ -60,12 +60,8 @@ AppInstallId quick_launch_single_click_get_app(ButtonId button) {
@@ -771,7 +771,7 @@ index 4afe8724f..1d420e518 100644
  
  AppInstallId watchface_get_default_install_id(void) {
 diff --git a/tests/stubs/default/quick_launch.c b/tests/stubs/default/quick_launch.c
-index 9c0cc9ac7..0c8956e04 100644
+index 9c0cc9a..0c8956e 100644
 --- a/tests/stubs/default/quick_launch.c
 +++ b/tests/stubs/default/quick_launch.c
 @@ -16,10 +16,6 @@ AppInstallId PBL_WEAK quick_launch_single_click_get_app(ButtonId button) {
@@ -787,5 +787,5 @@ index 9c0cc9ac7..0c8956e04 100644
    return 0;
  }
 -- 
-2.43.0
+2.55.0
 
