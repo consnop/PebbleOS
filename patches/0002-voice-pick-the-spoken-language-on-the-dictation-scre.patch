@@ -1,7 +1,7 @@
 From 3f0bacb1b69e4fe2b58d06cc91d99c1ced9121cc Mon Sep 17 00:00:00 2001
 From: consnop <consnop@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 15:09:27 +0100
-Subject: [PATCH 2/2] voice: pick the spoken language on the dictation screen
+Subject: [PATCH 2/3] voice: pick the spoken language on the dictation screen
 
 Phone-side transcription with auto-detection often guesses the wrong
 language for short phrases. The dictation screen now shows an SK / EN / DE

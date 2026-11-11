@@ -1,0 +1,203 @@
+From 156984e367a71b069f03aa86a61dd4e12e8d57b2 Mon Sep 17 00:00:00 2001
+From: consnop <consnop@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 15:42:54 +0100
+Subject: [PATCH 3/3] bluetooth: let other devices pair for one connection
+
+While a phone was bonded the watch refused every new pairing, and since
+it keeps a single BLE bonding, the only way to talk to another device
+(e.g. a laptop acting as the phone) was to replace the phone's bonding.
+
+Accept pairing from a device that is neither bonded nor connected while
+the watch is pairable, but without bonding: sm_bonding is cleared for
+that link, so no keys are stored and the phone's bonding stays. Secure
+Connections with MITM are already required (SM level 4); a link that
+still ends up unauthenticated is dropped.
+
+Bluetooth settings now make the watch discoverable while shown, also
+when a phone is bonded, so such devices can find it. Accepting new
+bondings still follows the single phone policy.
+
+Assisted-by: LLM
+Signed-off-by: consnop <consnop@users.noreply.github.com>
+---
+ include/pbl/services/bluetooth/pairability.h |  6 ++++
+ pebble/apps/system/settings/bluetooth.c      |  4 +++
+ pebble/services/bluetooth/pairability.c      | 25 +++++++++++----
+ subsys/bluetooth/advert.c                    | 32 ++++++++++++++++++++
+ 4 files changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/include/pbl/services/bluetooth/pairability.h b/include/pbl/services/bluetooth/pairability.h
+index dbb1e55..2d9aa86 100644
+--- a/include/pbl/services/bluetooth/pairability.h
++++ b/include/pbl/services/bluetooth/pairability.h
+@@ -49,6 +49,12 @@ void bt_pairability_release(void);
+  */
+ void bt_pairability_release_ble(void);
+ 
++//! Advertise as discoverable without accepting new bondings. Other devices can then find the
++//! watch and pair with it for one connection only.
++void bt_discoverability_use(void);
++
++void bt_discoverability_release(void);
++
+ /**
+  * @brief Re-evaluate pairability after the bondings changed.
+  *
+diff --git a/pebble/apps/system/settings/bluetooth.c b/pebble/apps/system/settings/bluetooth.c
+index d60814f..7852ee7 100644
+--- a/pebble/apps/system/settings/bluetooth.c
++++ b/pebble/apps/system/settings/bluetooth.c
+@@ -559,6 +559,9 @@ static void prv_expand_cb(SettingsCallbacks *context) {
+   event_service_client_subscribe(&data->bt_pairing_event_info);
+   event_service_client_subscribe(&data->ble_device_name_updated_event_info);
+ 
++  // Discoverable while shown, so other devices can find the watch and pair without bonding
++  bt_discoverability_use();
++
+   // Only enable pairing/advertising if there are no paired devices (single phone policy)
+   data->did_enable_pairability = false;
+   if (!data->remote_list_head) {
+@@ -580,6 +583,7 @@ static void prv_hide_cb(SettingsCallbacks *context) {
+   if (data->did_enable_pairability) {
+     bt_pairability_release();
+   }
++  bt_discoverability_release();
+ 
+ #ifdef CONFIG_SERVICE_BLE_HRM
+   event_service_client_unsubscribe(&data->ble_hrm_sharing_event_info);
+diff --git a/pebble/services/bluetooth/pairability.c b/pebble/services/bluetooth/pairability.c
+index 7b56c09..2825583 100644
+--- a/pebble/services/bluetooth/pairability.c
++++ b/pebble/services/bluetooth/pairability.c
+@@ -16,6 +16,7 @@
+ PBL_LOG_MODULE_DECLARE(service_bluetooth, CONFIG_SERVICE_BLUETOOTH_LOG_LEVEL);
+ 
+ static int s_allow_ble_pairing_refcount = 0;
++static int s_discoverable_refcount = 0;
+ static bool s_last_ble_discoverable_state = false;
+ 
+ static struct pbl_wallclock_work s_pairability_work;
+@@ -29,17 +30,18 @@ static void evaluate_pairing_refcount(void *data) {
+ 
+   PBL_LOG_DBG("Pairabilty state: LE=%u", s_allow_ble_pairing_refcount);
+ 
+-  bool is_ble_pairable_and_discoverable = (s_allow_ble_pairing_refcount > 0);
++  const bool is_ble_pairable = (s_allow_ble_pairing_refcount > 0);
++  const bool is_ble_discoverable = is_ble_pairable || (s_discoverable_refcount > 0);
+ 
+-  pbl_bt_le_pairability_set_enabled(is_ble_pairable_and_discoverable);
+-  if (s_last_ble_discoverable_state != is_ble_pairable_and_discoverable) {
+-    if (is_ble_pairable_and_discoverable) {
++  pbl_bt_le_pairability_set_enabled(is_ble_pairable);
++  if (s_last_ble_discoverable_state != is_ble_discoverable) {
++    if (is_ble_discoverable) {
+       bt_local_addr_pause_cycling();
+     } else {
+       bt_local_addr_resume_cycling();
+     }
+-    gap_le_slave_set_discoverable(is_ble_pairable_and_discoverable);
+-    s_last_ble_discoverable_state = is_ble_pairable_and_discoverable;
++    gap_le_slave_set_discoverable(is_ble_discoverable);
++    s_last_ble_discoverable_state = is_ble_discoverable;
+   }
+ }
+ 
+@@ -88,6 +90,17 @@ void bt_pairability_release_ble(void) {
+   prv_schedule_evaluation();
+ }
+ 
++void bt_discoverability_use(void) {
++  ++s_discoverable_refcount;
++  prv_schedule_evaluation();
++}
++
++void bt_discoverability_release(void) {
++  PBL_ASSERT(s_discoverable_refcount != 0, "");
++  --s_discoverable_refcount;
++  prv_schedule_evaluation();
++}
++
+ //! Call this whenever we modify the number of saved bondings we have.
+ void bt_pairability_update_due_to_bonding_change(void) {
+   static bool s_pairable_due_to_no_gateway_bondings = false;
+diff --git a/subsys/bluetooth/advert.c b/subsys/bluetooth/advert.c
+index 4632698..ff9c1fb 100644
+--- a/subsys/bluetooth/advert.c
++++ b/subsys/bluetooth/advert.c
+@@ -17,6 +17,7 @@
+ #include <pbl/util/math.h>
+ 
+ #include <host/ble_gap.h>
++#include <host/ble_hs.h>
+ #include <os/os_mbuf.h>
+ 
+ PBL_LOG_MODULE_DECLARE(bt, CONFIG_BT_LOG_LEVEL);
+@@ -25,6 +26,22 @@ static const ble_uuid16_t s_device_name_chr_uuid = BLE_UUID16_INIT(0x2A00);
+ static char s_device_name[PBL_BT_DEVICE_NAME_BUFFER_SIZE];
+ static bool s_pairing_in_progress;
+ static uint16_t s_pairing_conn_handle;
++//! The current link may only pair without bonding: it is neither bonded nor connected while
++//! pairable, so it must not replace the phone's bonding.
++static bool s_temporary_pairing;
++
++static bool prv_is_bonded(const ble_addr_t *peer_id_addr) {
++  struct ble_store_key_sec key_sec = {.peer_addr = *peer_id_addr};
++  struct ble_store_value_sec value_sec;
++  return ble_store_read_peer_sec(&key_sec, &value_sec) == 0;
++}
++
++// Our pairing response is built before BLE_GAP_EVENT_PAIRING_REQUEST, so the bonding
++// flag has to be set when the link comes up. There is only one link at a time.
++static void prv_set_temporary_pairing(bool temporary) {
++  s_temporary_pairing = temporary;
++  ble_hs_cfg.sm_bonding = temporary ? 0 : MYNEWT_VAL(BLE_SM_BONDING);
++}
+ 
+ static int prv_device_name_read_event_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                                          struct ble_gatt_attr *attr, void *arg) {
+@@ -97,6 +114,8 @@ static void prv_handle_connection_event(struct ble_gap_event *event) {
+     return;
+   }
+ 
++  prv_set_temporary_pairing(!pairability_is_enabled() && !prv_is_bonded(&desc.peer_id_addr));
++
+   struct pbl_bt_conn_complete_event complete_event = {
+     .handle = event->connect.conn_handle,
+     .is_master = desc.role == BLE_GAP_ROLE_MASTER,
+@@ -167,6 +186,7 @@ static void prv_end_pairing(uint16_t conn_handle, bool success) {
+ static void prv_handle_disconnection_event(struct ble_gap_event *event) {
+   // A link dropped mid-pairing raises no pairing complete event.
+   prv_end_pairing(event->disconnect.conn.conn_handle, false);
++  prv_set_temporary_pairing(false);
+ 
+   struct pbl_bt_gatt_device_disconnection_event gatt_event;
+   nimble_addr_to_pebble_addr(&event->disconnect.conn.peer_id_addr, &gatt_event.dev_address);
+@@ -192,6 +212,13 @@ static void prv_handle_enc_change_event(struct ble_gap_event *event) {
+   PBL_LOG_INFO("Encryption change: status=0x%04x encrypted=%u bonded=%u",
+                (uint16_t)event->enc_change.status, desc.sec_state.encrypted, desc.sec_state.bonded);
+ 
++  // A temporary pairing must have been confirmed on the watch (numeric comparison).
++  if (s_temporary_pairing && desc.sec_state.encrypted && !desc.sec_state.authenticated) {
++    PBL_LOG_WRN("Unauthenticated temporary pairing, disconnecting");
++    ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_AUTH_FAIL);
++    return;
++  }
++
+   struct pbl_bt_encryption_change enc_change_event = {
+     .encryption_enabled = desc.sec_state.encrypted,
+     .status = event->enc_change.status, // doesn't technically match but only logged so this is fine
+@@ -345,6 +372,11 @@ static int prv_handle_pairing_request_event(struct ble_gap_event *event) {
+     return 0;
+   }
+ 
++  if (s_temporary_pairing) {
++    PBL_LOG_INFO("Pairing request accepted without bonding");
++    return 0;
++  }
++
+   PBL_LOG_INFO("Pairing request rejected: not pairable");
+   return BLE_SM_ERR_PAIR_NOT_SUPP;
+ }
+-- 
+2.55.0
+
