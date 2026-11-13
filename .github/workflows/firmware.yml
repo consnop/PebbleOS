@@ -50,9 +50,18 @@ jobs:
           if [ -n "${INPUT_TAG:-}" ]; then
             tag="$INPUT_TAG"
           else
-            tags=$(gh api --paginate "repos/coredevices/PebbleOS/releases?per_page=100" \
-              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
-              | grep -E '^v[0-9]+\.[0-9]{2,}\.[0-9]+$' || true)
+            # Fetch with retries, filter separately: an API hiccup (2026-11-12: HTTP/2 stream CANCEL)
+            # must fail loudly, not look like "no matching release".
+            for attempt in 1 2 3 4 5; do
+              if all_tags=$(gh api --paginate "repos/coredevices/PebbleOS/releases?per_page=100" \
+                  --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'); then
+                break
+              fi
+              [ "$attempt" -lt 5 ] || { echo "::error::couldn't list upstream releases"; exit 1; }
+              echo "Listing upstream releases failed (attempt $attempt), retrying..."
+              sleep $((attempt * 15))
+            done
+            tags=$(grep -E '^v[0-9]+\.[0-9]{2,}\.[0-9]+$' <<< "$all_tags" || true)
             if [ "$TRACK" != latest ]; then
               tags=$(printf '%s\n' "$tags" | grep -F -- "$TRACK" | grep -E "^$(printf '%s' "$TRACK" | sed 's/\./\\./g')" || true)
             fi
@@ -65,7 +74,7 @@ jobs:
 
           # Build in the same image upstream's CI used for that tag.
           # Download first, then search: grep -m1 closing the pipe early fails curl (exit 23) under pipefail.
-          upstream_wf=$(curl -fsSL "https://raw.githubusercontent.com/coredevices/PebbleOS/${tag}/.github/workflows/build-firmware.yml")
+          upstream_wf=$(curl -fsSL --retry 5 --retry-all-errors "https://raw.githubusercontent.com/coredevices/PebbleOS/${tag}/.github/workflows/build-firmware.yml")
           image=$(grep -o 'ghcr.io/coredevices/pebbleos-docker:[A-Za-z0-9._-]*' <<< "$upstream_wf" | sed -n 1p)
           [ -n "$image" ] || { echo "::error::no pebbleos-docker image in upstream's build-firmware.yml at $tag"; exit 1; }
 
