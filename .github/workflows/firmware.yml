@@ -98,6 +98,7 @@ jobs:
       image: ${{ needs.plan.outputs.image }}
     outputs:
       patches_applied: ${{ steps.am.outcome == 'success' }}
+      am_outcome: ${{ steps.am.outcome }}
     env:
       TAG: ${{ needs.plan.outputs.tag }}
       RELEASE: ${{ needs.plan.outputs.release }}
@@ -220,35 +221,30 @@ jobs:
           gh release delete "$RELEASE" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$RELEASE" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "$RELEASE" --notes-file notes.md --latest
-      # A rebase that builds and releases resolves the conflict issue for this tag.
+      # A release resolves this tag's pipeline issues (conflicts and build failures).
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
           RELEASE: ${{ needs.plan.outputs.release }}
-        run: |
-          title="Patches don't apply to $TAG"
-          for n in $(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number,title --jq ".[] | select(.title == \"$title\") | .number"); do
-            gh issue close "$n" -R "$GITHUB_REPOSITORY" --comment "Built and released as $RELEASE."
-          done
+        run: python3 .github/pipeline-issue.py close
 
-  conflict:
+  report:
+    # git am failed (conflict), or the patches applied and the build failed. See .github/pipeline-issue.py.
     needs: [plan, build]
-    if: failure() && needs.build.outputs.patches_applied != 'true' && needs.plan.outputs.build == 'true'
+    if: failure() && needs.plan.outputs.build == 'true'
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       issues: write
+      actions: read
     steps:
+      - uses: actions/checkout@v7
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE: ${{ needs.plan.outputs.release }}
+          RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          title="Patches don't apply to $TAG"
-          if gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[].number' | grep -q .; then
-            echo "Issue already open."; exit 0
-          fi
-          gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label needs-owner --body \
-            "\`git am\` failed applying \`patches/\` to upstream \`$TAG\`. Run: $RUN_URL
-
-          Rebase the patches onto \`$TAG\`, regenerate them with \`git format-patch\`, and push to the \`pipeline\` branch." \
-            || gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "\`git am\` failed on \`$TAG\`. Run: $RUN_URL"
+          UPSTREAM: PebbleOS
+          KIND: ${{ needs.build.outputs.am_outcome == 'failure' && 'conflict' || 'build' }}
+        run: python3 .github/pipeline-issue.py report "$KIND"
