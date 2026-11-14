@@ -1,4 +1,4 @@
-From fb0455737438321e58f917dfee32c91965a489cd Mon Sep 17 00:00:00 2001
+From d4b574550b954895143399c2930c5cc3dd01429c Mon Sep 17 00:00:00 2001
 From: consnop <consnop@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 15:09:27 +0100
 Subject: [PATCH 2/3] voice: pick the spoken language on the dictation screen
@@ -17,8 +17,10 @@ pref (default English) and sent to the phone:
 Both ids are outside upstream's ranges. Phones that don't know them ignore
 the attribute; the message is new and only consnop's Gravel handles it.
 
-VoiceWindow keeps its applib_malloc size: the row's layer is allocated
-separately and its padding absorbs the new pointer. The pref is
+VoiceWindow keeps its applib_malloc size and padding: the row's layer is
+allocated separately, and the mic text buffer gives up 4 of its 48 bytes
+for the pointer (VoiceUiData is 8-byte aligned, so upstream's 7 bytes of
+padding can't absorb it). The pref is
 written from the system work queue rather than the app's syscall.
 
 Assisted-by: LLM
@@ -27,9 +29,8 @@ Signed-off-by: consnop <consnop@users.noreply.github.com>
  include/pbl/services/voice/voice.h            | 25 ++++++++
  include/pbl/services/voice_endpoint.h         | 22 +++++++
  include/pbl/services/voice_endpoint_private.h | 16 +++++
- pebble/applib/applib_malloc.json              |  2 +-
  pebble/applib/voice/voice_window.c            | 63 +++++++++++++++++++
- pebble/applib/voice/voice_window_private.h    |  4 ++
+ pebble/applib/voice/voice_window_private.h    |  6 +-
  pebble/services/voice/voice.c                 | 51 ++++++++++++++-
  pebble/services/voice_endpoint/service.c      | 34 +++++++++-
  pebble/shell/normal/prefs.c                   | 18 ++++++
@@ -38,10 +39,10 @@ Signed-off-by: consnop <consnop@users.noreply.github.com>
  pebble/shell/prf/stubs.c                      |  8 +++
  pebble/shell/sdk/stubs.c                      |  8 +++
  tests/pebble/services/test_voice_endpoint.c   | 53 ++++++++++++++++
- 14 files changed, 305 insertions(+), 4 deletions(-)
+ 13 files changed, 305 insertions(+), 4 deletions(-)
 
 diff --git a/include/pbl/services/voice/voice.h b/include/pbl/services/voice/voice.h
-index 0c4ac3376..4694a04ed 100644
+index 0c4ac337..4694a04e 100644
 --- a/include/pbl/services/voice/voice.h
 +++ b/include/pbl/services/voice/voice.h
 @@ -114,6 +114,31 @@ void voice_cancel_dictation(VoiceSessionId session_id);
@@ -77,7 +78,7 @@ index 0c4ac3376..4694a04ed 100644
   * @brief Handle a session setup result received by the voice endpoint.
   *
 diff --git a/include/pbl/services/voice_endpoint.h b/include/pbl/services/voice_endpoint.h
-index bca533e02..e6ce65208 100644
+index bca533e0..e6ce6520 100644
 --- a/include/pbl/services/voice_endpoint.h
 +++ b/include/pbl/services/voice_endpoint.h
 @@ -93,4 +93,26 @@ void voice_endpoint_setup_session(VoiceEndpointSessionType session_type,
@@ -108,7 +109,7 @@ index bca533e02..e6ce65208 100644
 +
  /** @} */
 diff --git a/include/pbl/services/voice_endpoint_private.h b/include/pbl/services/voice_endpoint_private.h
-index bbdcee680..f5ec70dbf 100644
+index bbdcee68..f5ec70db 100644
 --- a/include/pbl/services/voice_endpoint_private.h
 +++ b/include/pbl/services/voice_endpoint_private.h
 @@ -23,6 +23,8 @@ typedef enum {
@@ -146,21 +147,8 @@ index bbdcee680..f5ec70dbf 100644
 +} SessionLanguageMsg;
 +
  /** @} */
-diff --git a/pebble/applib/applib_malloc.json b/pebble/applib/applib_malloc.json
-index d8910b1f1..d657b02a7 100644
---- a/pebble/applib/applib_malloc.json
-+++ b/pebble/applib/applib_malloc.json
-@@ -254,7 +254,7 @@
-         "_comment": "Generously padded because it's not feature complete yet (only 3.x)"
-     }, {
-         "name": "VoiceWindow",
--        "size_3x_padding": 7,
-+        "size_3x_padding": 3,
-         "size_3x": 2384,
-         "dependencies": ["TranscriptionDialog", "Layer", "Layer", "StatusBarLayer", "TextLayer", 
-                          "KinoLayer", "Window", "EventServiceInfo"],
 diff --git a/pebble/applib/voice/voice_window.c b/pebble/applib/voice/voice_window.c
-index 96a63fd36..29cf616b7 100644
+index 96a63fd3..29cf616b 100644
 --- a/pebble/applib/voice/voice_window.c
 +++ b/pebble/applib/voice/voice_window.c
 @@ -907,6 +907,57 @@ static void prv_shrink_progress_bar(VoiceUiData *data) {
@@ -262,7 +250,7 @@ index 96a63fd36..29cf616b7 100644
    status_bar_layer_deinit(&data->mic_window.status_bar);
    event_service_client_unsubscribe(&data->voice_event_sub);
 diff --git a/pebble/applib/voice/voice_window_private.h b/pebble/applib/voice/voice_window_private.h
-index 53a58a2e7..46739b494 100644
+index 53a58a2e..aa7b589e 100644
 --- a/pebble/applib/voice/voice_window_private.h
 +++ b/pebble/applib/voice/voice_window_private.h
 @@ -8,6 +8,8 @@
@@ -274,7 +262,13 @@ index 53a58a2e7..46739b494 100644
  #include <applib/app_timer.h>
  #include <applib/event_service_client.h>
  #include <applib/ui/animation.h>
-@@ -49,6 +51,8 @@ typedef struct VoiceUiData {
+@@ -44,11 +46,13 @@ typedef struct VoiceUiData {
+     Layer mic_dot_layer;
+     int16_t mic_dot_radius;
+     TextLayer text_layer;
+-    char text_buffer[48]; // Fits "Retrying offline" with room for i18n
++    char text_buffer[44]; // Fits "Retrying offline" with room for i18n (48 upstream; see language_layer)
+     StatusBarLayer status_bar;
      LoadingLayer progress_bar;
      PropertyAnimation *progress_anim;
      PropertyAnimation *fly_anim;
@@ -284,7 +278,7 @@ index 53a58a2e7..46739b494 100644
  
    union {
 diff --git a/pebble/services/voice/voice.c b/pebble/services/voice/voice.c
-index c8091f1a6..3439a145f 100644
+index c8091f1a..3439a145 100644
 --- a/pebble/services/voice/voice.c
 +++ b/pebble/services/voice/voice.c
 @@ -25,6 +25,7 @@
@@ -367,7 +361,7 @@ index c8091f1a6..3439a145f 100644
              (VAL, VoiceEndpointSessionType, session_type)) {
    if ((session_type >= VoiceEndpointSessionTypeCount) ||
 diff --git a/pebble/services/voice_endpoint/service.c b/pebble/services/voice_endpoint/service.c
-index cb3681a3b..02ee178f0 100644
+index cb3681a3..02ee178f 100644
 --- a/pebble/services/voice_endpoint/service.c
 +++ b/pebble/services/voice_endpoint/service.c
 @@ -233,6 +233,13 @@ void voice_endpoint_protocol_msg_callback(struct pbl_pp_session *session, const
@@ -429,7 +423,7 @@ index cb3681a3b..02ee178f0 100644
 +  pbl_free(msg);
 +}
 diff --git a/pebble/shell/normal/prefs.c b/pebble/shell/normal/prefs.c
-index 3645d0bc6..d53a4d132 100644
+index 3645d0bc..d53a4d13 100644
 --- a/pebble/shell/normal/prefs.c
 +++ b/pebble/shell/normal/prefs.c
 @@ -12,6 +12,7 @@
@@ -476,7 +470,7 @@ index 3645d0bc6..d53a4d132 100644
 +  prv_pref_set(PREF_KEY_DICTATION_LANGUAGE, &language, sizeof(language));
 +}
 diff --git a/pebble/shell/normal/prefs_values.h.inc b/pebble/shell/normal/prefs_values.h.inc
-index 6d7ba5b1b..04838a95e 100644
+index 6d7ba5b1..04838a95 100644
 --- a/pebble/shell/normal/prefs_values.h.inc
 +++ b/pebble/shell/normal/prefs_values.h.inc
 @@ -33,6 +33,7 @@
@@ -488,7 +482,7 @@ index 6d7ba5b1b..04838a95e 100644
    PREFS_MACRO(PREF_KEY_QUICK_LAUNCH_DOWN, s_quick_launch_down)
    PREFS_MACRO(PREF_KEY_QUICK_LAUNCH_SELECT, s_quick_launch_select)
 diff --git a/pebble/shell/prefs.h b/pebble/shell/prefs.h
-index e803901ce..f1d60d9d1 100644
+index e803901c..f1d60d9d 100644
 --- a/pebble/shell/prefs.h
 +++ b/pebble/shell/prefs.h
 @@ -238,6 +238,10 @@ ShellLanguage shell_prefs_get_language(void);
@@ -503,7 +497,7 @@ index e803901ce..f1d60d9d1 100644
  void timeline_prefs_set_settings_opened(uint8_t version);
  void timeline_peek_prefs_set_enabled(bool enabled);
 diff --git a/pebble/shell/prf/stubs.c b/pebble/shell/prf/stubs.c
-index e699a363c..efd0aa00a 100644
+index e699a363..efd0aa00 100644
 --- a/pebble/shell/prf/stubs.c
 +++ b/pebble/shell/prf/stubs.c
 @@ -11,6 +11,7 @@
@@ -526,7 +520,7 @@ index e699a363c..efd0aa00a 100644
 +void shell_prefs_set_dictation_language(uint8_t language) {
 +}
 diff --git a/pebble/shell/sdk/stubs.c b/pebble/shell/sdk/stubs.c
-index c9236c60f..24edede4e 100644
+index c9236c60..24edede4 100644
 --- a/pebble/shell/sdk/stubs.c
 +++ b/pebble/shell/sdk/stubs.c
 @@ -6,6 +6,7 @@
@@ -549,7 +543,7 @@ index c9236c60f..24edede4e 100644
 +void shell_prefs_set_dictation_language(uint8_t language) {
 +}
 diff --git a/tests/pebble/services/test_voice_endpoint.c b/tests/pebble/services/test_voice_endpoint.c
-index 721b410b7..ac84fbf12 100644
+index 721b410b..ac84fbf1 100644
 --- a/tests/pebble/services/test_voice_endpoint.c
 +++ b/tests/pebble/services/test_voice_endpoint.c
 @@ -266,6 +266,59 @@ void test_voice_endpoint__send_session_setup_app_initiated(void) {
@@ -613,5 +607,5 @@ index 721b410b7..ac84fbf12 100644
    uint8_t setup_response[] = {
      0x01,                   // Message ID: Session setup
 -- 
-2.43.0
+2.55.0
 
