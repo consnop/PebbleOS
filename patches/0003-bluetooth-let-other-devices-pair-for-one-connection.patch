@@ -1,4 +1,4 @@
-From 156984e367a71b069f03aa86a61dd4e12e8d57b2 Mon Sep 17 00:00:00 2001
+From 4c50c7e2d5a2651c2b8b20bd1a4b92334a804e76 Mon Sep 17 00:00:00 2001
 From: consnop <consnop@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 15:42:54 +0100
 Subject: [PATCH 3/3] bluetooth: let other devices pair for one connection
@@ -27,7 +27,7 @@ Signed-off-by: consnop <consnop@users.noreply.github.com>
  4 files changed, 61 insertions(+), 6 deletions(-)
 
 diff --git a/include/pbl/services/bluetooth/pairability.h b/include/pbl/services/bluetooth/pairability.h
-index dbb1e55..2d9aa86 100644
+index dbb1e5525..2d9aa86c6 100644
 --- a/include/pbl/services/bluetooth/pairability.h
 +++ b/include/pbl/services/bluetooth/pairability.h
 @@ -49,6 +49,12 @@ void bt_pairability_release(void);
@@ -44,7 +44,7 @@ index dbb1e55..2d9aa86 100644
   * @brief Re-evaluate pairability after the bondings changed.
   *
 diff --git a/pebble/apps/system/settings/bluetooth.c b/pebble/apps/system/settings/bluetooth.c
-index d60814f..7852ee7 100644
+index d60814f76..7852ee792 100644
 --- a/pebble/apps/system/settings/bluetooth.c
 +++ b/pebble/apps/system/settings/bluetooth.c
 @@ -559,6 +559,9 @@ static void prv_expand_cb(SettingsCallbacks *context) {
@@ -66,7 +66,7 @@ index d60814f..7852ee7 100644
  #ifdef CONFIG_SERVICE_BLE_HRM
    event_service_client_unsubscribe(&data->ble_hrm_sharing_event_info);
 diff --git a/pebble/services/bluetooth/pairability.c b/pebble/services/bluetooth/pairability.c
-index 7b56c09..2825583 100644
+index 7b56c0902..282558301 100644
 --- a/pebble/services/bluetooth/pairability.c
 +++ b/pebble/services/bluetooth/pairability.c
 @@ -16,6 +16,7 @@
@@ -121,7 +121,7 @@ index 7b56c09..2825583 100644
  void bt_pairability_update_due_to_bonding_change(void) {
    static bool s_pairable_due_to_no_gateway_bondings = false;
 diff --git a/subsys/bluetooth/advert.c b/subsys/bluetooth/advert.c
-index 4632698..ff9c1fb 100644
+index c4d88731b..4bbd275a9 100644
 --- a/subsys/bluetooth/advert.c
 +++ b/subsys/bluetooth/advert.c
 @@ -17,6 +17,7 @@
@@ -199,5 +199,5 @@ index 4632698..ff9c1fb 100644
    return BLE_SM_ERR_PAIR_NOT_SUPP;
  }
 -- 
-2.55.0
+2.43.0
 
